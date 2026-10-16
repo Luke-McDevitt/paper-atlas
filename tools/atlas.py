@@ -11,6 +11,7 @@ lookup tables, the atlas page and the portable zip -- resumably, skipping every 
     python tools/atlas.py open                                              # the atlas page (with figure images)
     python tools/atlas.py selftest                                          # an offline end-to-end run in a temp folder
     python tools/atlas.py export-kit <folder> [--zip] [--check]             # (this repo) the standalone lab-mate kit
+    python tools/atlas.py publish <clone> [--push]                          # (this repo) the kit -> the public repo
 
 Every command takes --project <folder> (default: $ATLAS_PROJECT, else the nearest folder holding atlas.toml from
 here up; in this repository with neither, the BlueBoat world-model atlas). tools/atlas_project.py says what a project
@@ -792,10 +793,29 @@ def cmd_selftest(keep: bool = False, say: Callable = print) -> int:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ------------------------------------------------------------------------------------------------ export-kit
+# ------------------------------------------------------------------------------------------- export-kit, publish
+def _in_repository(cmd: str, say: Callable) -> bool:
+    """export-kit and publish need tools/atlas_kit.py, which no kit carries (in a kit they died on its import)."""
+    if KIT_ROOT is not None:
+        say(f"{cmd} runs in the repository the kit is made from (it is not part of a kit)")
+        return False
+    return True
+
+
 def cmd_export_kit(out: str, make_zip: bool = False, check: bool = False, say: Callable = print) -> int:
+    if not _in_repository("export-kit", say):
+        return 2
     import atlas_kit as K
     return K.export(Path(out), make_zip=make_zip, check=check, say=say)
+
+
+def cmd_publish(clone: str, push: bool = False, say: Callable = print) -> int:
+    """The kit -> a clone of the public repository (tools/atlas_kit.py, PUBLISH): export with --check, write it over
+    the clone's tree, commit naming the private commit; push only with --push."""
+    if not _in_repository("publish", say):
+        return 2
+    import atlas_kit as K
+    return K.publish(Path(clone), push=push, say=say)
 
 
 # ------------------------------------------------------------------------------------------------------ main
@@ -807,7 +827,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             pass
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("cmd", choices=["new", "add", "update", "status", "find", "zip", "open", "selftest",
-                                    "export-kit"])
+                                    "export-kit", "publish"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("--project", default="", help="the project folder (default: $ATLAS_PROJECT, or the nearest "
                                                   "atlas.toml from here up)")
@@ -827,6 +847,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--no-launch", action="store_true", help="open: print the path only")
     ap.add_argument("--zip", action="store_true", help="export-kit: also zip the kit")
     ap.add_argument("--check", action="store_true", help="export-kit: run the kit's selftest from the exported copy")
+    ap.add_argument("--push", action="store_true", help="publish: also push (without it: commit in the clone only)")
     ap.add_argument("--keep", action="store_true", help="selftest: keep the temp project")
     a, rest = ap.parse_known_args(argv)
     if a.cmd == "new":
@@ -839,6 +860,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if len(a.args) != 1:
             ap.error("export-kit takes the folder to write the kit to")
         return cmd_export_kit(a.args[0], make_zip=a.zip, check=a.check)
+    if a.cmd == "publish":
+        if len(a.args) != 1:
+            ap.error("publish takes a clone of the public repository (git clone it first)")
+        return cmd_publish(a.args[0], push=a.push)
     P = project_of(a.project or None)
     if a.cmd == "add":
         if not a.args:

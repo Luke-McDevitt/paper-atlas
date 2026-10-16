@@ -1,9 +1,9 @@
 {
  "kit": "Paper Atlas kit",
- "made": "2026-10-15",
+ "made": "2026-10-16",
  "from": {
   "repository": "sonar-video-fusion-review (RoboPI lab)",
-  "commit": "448ae617d6410e4d8ed84f3d3f1c7bd9a636beeb",
+  "commit": "5ea0abb5816182be02d276bd0a0f6e05de497f14",
   "uncommitted_changes": false
  },
  "files": {
@@ -29,7 +29,7 @@
   "setup.sh": "fe19a933d6d990bd86c3e398f884678358344124a2a77631d4b59f210f5c50c4",
   "tools/arxiv_html.py": "ba878a3de2d9beebb3b7236b8453325f5e69f5b9085f2b5b375857b46047b4b1",
   "tools/arxiv_pace.py": "8c1e0340cab685a186ed1193bf845f3c9342cde13dc0aebf3d1968db5893555f",
-  "tools/atlas.py": "427aec1ff688fcc32ee94df5997f4890a6a360b1de1b58f259f8830d27e8539c",
+  "tools/atlas.py": "f65ab18683343a61df3328de3e7b796260c93f861bd64f440bfeadbe00481bf3",
   "tools/atlas_intake.py": "484b1633d9e8d7c8cfbbdf3511726143a44d80ee2c1f6e544551f9fb1d99eefa",
   "tools/atlas_project.py": "f83706d4d7ca52b0ce00946f9e7a34ac807b62e1d6df71d2f223db8044c06a96",
   "tools/atlas_setup.py": "dfd4ca131db54bac69ec1cda139763f9caae6ca7efcac47bae089d25b1e554e2",
