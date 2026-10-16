@@ -1,0 +1,4 @@
+# The kit's own Python environment (setup.cmd / setup.sh make it) and Python caches -- never part of the kit.
+.venv/
+__pycache__/
+*.pyc

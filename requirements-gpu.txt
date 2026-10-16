@@ -1,0 +1,11 @@
+# Optional: dense search (embeddings) and DocLayout-YOLO figure detection. Install with `setup gpu` (setup.cmd gpu,
+# ./setup.sh gpu), NOT a plain `pip install -r` of this file: tools/atlas_setup.py first installs PyTorch's CUDA build
+# for this machine's NVIDIA driver (download.pytorch.org; the CPU build without one), then this list held to that
+# torch. On its own, pip let doclayout-yolo's torchvision swap a CUDA torch for PyPI's CPU build (2026-10-15).
+# Tested 2026-10-15 (Windows, Python 3.14.7, RTX 4060): torch 2.14.1+cu130, torchvision 0.29.1+cu130, transformers
+# 5.20.0, sentence-transformers 6.1.0, huggingface-hub 1.33.0, doclayout-yolo 0.0.4.
+torch>=2.3
+transformers>=4.44
+sentence-transformers>=3.0
+huggingface-hub>=0.24
+doclayout-yolo>=0.0.3

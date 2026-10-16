@@ -1,0 +1,11 @@
+# Paper Atlas kit -- the core (Python 3.11+). In brackets: the versions it was tested with (2026-10-15).
+pypdfium2>=4.30          # PDF text and page images (5.14.0)
+pdfminer.six>=20231228   # page-1 text fallback (20260107)
+numpy>=1.26              # (2.5.3)
+matplotlib>=3.8          # the citation-map figures, the self-test's PDFs (3.11.2)
+openpyxl>=3.1            # ATLAS.xlsx (3.1.5)
+python-docx>=1.1         # the Word copies' styles (1.2.0)
+Pillow>=10.0             # figure images (12.2.0)
+lxml>=5.0                # arXiv HTML parsing (6.1.3)
+pymupdf>=1.24           # page images for the figure finder (AGPL-3.0: fine for internal academic use)
+pypdf>=4.0              # PDF metadata fallbacks
