@@ -20,6 +20,10 @@ LAYOUT (one top folder, so unzipping never spills files):
     boat_wm_atlas/reports/...         README.md (the hub), STATE_OF_RESEARCH.md, LIT_*.md, plans/, recon/
     boat_wm_atlas/README.txt          what is inside, counts, and what was left out
     boat_wm_atlas/MANIFEST.json       every file: path, bytes, sha256
+    boat_wm_atlas/atlas_<id>.html     (atlas.toml sections_mode = "atlases") each section's own atlas page and its
+                                      atlas_<id>_citations.js / _figures.js, the banner row linking them; and beside the
+                                      zip, one zip PER SECTION (<short_name>_<id>_<date>.zip): its page as atlas.html,
+                                      its papers' PDFs and figures only, no link to any other page (2026-10-15)
 
 RULES: the page and index come from a FRESH build (never a stale index/); a PDF is packed only if its file is present
 with the bytes `scan` recorded -- under its recorded name, or (2026-10-15) under another name with the recorded
@@ -44,6 +48,9 @@ REPORT_GLOBS = ("README.md", "STATE_OF_RESEARCH.md", "LIT_*.md", "plans/*.md", "
 INDEX_FILES = ("PAPERS.md", "LEXICON.md", "LABS.md", "PAPER_DOWNLOAD_LIST.md", "papers.json", "lexicon.json",
                "labs.json", "web.json", "atlas_citations.js")
 SIDECARS = ("atlas_citations.js", "atlas_figures.js")      # beside atlas.html: the page loads them by <script src>
+#: a section's own atlas page and its two sidecars (build_bwm.section_atlases, `atlases` mode)
+SECTION_PAGE = re.compile(r"^atlas_([a-z0-9][a-z0-9_-]*)\.html$")
+SECTION_SIDE = re.compile(r"^atlas_[a-z0-9][a-z0-9_-]*_(citations|figures)\.js$")
 
 
 def figure_files(base: Path, store: Optional[Path]) -> Tuple[List[Tuple[Path, str]], int]:
@@ -152,15 +159,17 @@ def _put_file(zf: zipfile.ZipFile, arc: str, src: Path, when) -> dict:
 
 def bundle(base: Path, pdf_dir: Path, out: Path, build_all, build_papers, standalone_page, include_pdfs: bool = True,
            date: str = "2026-01-01", say=print, office_outputs=None, rejected_ids=None,
-           figure_store: Optional[Path] = None, names: Optional[dict] = None) -> dict:
-    """Write the zip; -> a summary {pdfs, left_out, bytes, files, figures}. The build functions come from build_bwm
-    (passed in, so this module never imports it back). `figure_store`: the figure bank whose images the Figures tab
-    shows (None: no images, the cards show captions only)."""
+           figure_store: Optional[Path] = None, names: Optional[dict] = None,
+           section_titles: Optional[Dict[str, str]] = None) -> dict:
+    """Write the zip; -> a summary {pdfs, left_out, bytes, files, figures, sections}. The build functions come from
+    build_bwm (passed in, so this module never imports it back). `figure_store`: the figure bank whose images the
+    Figures tab shows (None: no images, the cards show captions only). In `atlases` mode the section pages ride in the
+    zip and each section gets its own zip beside it (`sections`: their summaries)."""
     _, alias_map, _ = build_papers(base)
     rejected = rejected_ids(base, alias_map)[0] if rejected_ids else {}
     pdfs, left = plan_pdfs(base, pdf_dir, alias_map, rejected) if include_pdfs else ([], [])
     local = {key: arc for key, _, arc, _ in pdfs}
-    outs = build_all(base, local_pdfs=local)
+    outs = build_all(base, local_pdfs=local, all_page="atlas.html")
     office = {k: v for k, v in (office_outputs(base, outs) if office_outputs else {}).items()
               if not k.startswith("_") and v}                 # no pandoc: the .docx are simply absent
     stats = json.loads(outs["papers.json"])["stats"]
@@ -177,8 +186,69 @@ def bundle(base: Path, pdf_dir: Path, out: Path, build_all, build_papers, standa
         part.unlink(missing_ok=True)                     # never leave a multi-GB half zip behind (full disk, Ctrl+C)
         raise
     part.replace(out)
+    secs = []
+    if any(SECTION_PAGE.match(n) for n in outs):       # `atlases` mode: one zip per section, with no other page
+        solo = build_all(base, local_pdfs=local, all_page="", section_links=False)
+        secs = section_bundles(base, pdfs, solo, figs, out, names or {}, section_titles or {}, date, when,
+                               standalone_page, include_pdfs, say)
     return {"pdfs": len(pdfs), "left_out": left, "bytes": out.stat().st_size, "files": total[1],
-            "uncompressed": total[0], "figures": len(figs), "figures_missing": figs_missing}
+            "uncompressed": total[0], "figures": len(figs), "figures_missing": figs_missing, "sections": secs}
+
+
+def section_bundles(base: Path, pdfs, solo: Dict[str, str], figs, out: Path, names: dict, titles: Dict[str, str],
+                    date: str, when, standalone_page, include_pdfs: bool, say=print) -> List[dict]:
+    """`atlases` mode: per section ONE zip beside the atlas's -- <short_name>_<id>_<date>.zip: the section's page as
+    atlas.html (rendered with no link to another page), its two sidecars, its papers' PDFs and figure images, a
+    README and a MANIFEST. -> [{id, zip, papers, pdfs, figures}]."""
+    papers = json.loads(solo["papers.json"])["papers"]
+    short = names.get("short_name") or TOP
+    res = []
+    for name in sorted(n for n in solo if SECTION_PAGE.match(n)):
+        sid = SECTION_PAGE.match(name).group(1)
+        keys = {p["key"] for p in papers if sid in (p.get("sections") or ())}
+        cjs, fjs = f"atlas_{sid}_citations.js", f"atlas_{sid}_figures.js"
+        shas = set()
+        if fjs in solo:
+            text = solo[fjs]
+            doc = json.loads(text[text.index("=") + 1:].rstrip().rstrip(";"))
+            shas = {r[1] for r in doc.get("papers") or []}
+        mine_figs = [(src, arc) for src, arc in figs if arc.split("/")[2] in shas]
+        mine_pdfs = [x for x in pdfs if x[0] in keys]
+        z = out.with_name(f"{short}_{sid}_{date}{'' if include_pdfs else '_no_pdfs'}.zip")
+        part = z.with_name(z.name + ".part")
+        manifest: List[dict] = []
+        try:
+            with zipfile.ZipFile(part, "w", allowZip64=True) as zf:
+                zf.atlas_top = f"{short}_{sid}"
+                manifest.append(_put(zf, "atlas.html", standalone_page(solo[name]).encode("utf-8"), when))
+                for side in (cjs, fjs):
+                    if side in solo:
+                        manifest.append(_put(zf, side, solo[side].encode("utf-8"), when))
+                for src, arc in mine_figs:
+                    manifest.append(_put_file(zf, arc, src, when))
+                for key, src, arc, row in mine_pdfs:
+                    manifest.append({**_put_file(zf, arc, src, when), "key": key, "source_file": src.name})
+                readme = "\n".join([
+                    f"{titles.get(sid) or sid} -- one section of {names.get('title') or 'the paper atlas'}, as its own atlas",
+                    f"Built {date} by build_bwm.py bundle (atlas.toml sections_mode = \"atlases\").", "",
+                    "Open atlas.html in a browser (keep the two atlas_*.js files beside it). A held paper's card opens",
+                    "its PDF from papers/; the Figures tab's images are in figures/.", "",
+                    f"Papers in this section: {len(keys)}. PDFs in this zip: {len(mine_pdfs)}"
+                    + ("" if include_pdfs else " (built with --no-pdfs)") + f". Figure images: {len(mine_figs)}.",
+                    "The PDFs are publisher / author copies for the lab's internal research use: do not redistribute them.",
+                    ""])
+                manifest.append(_put(zf, "README.txt", readme.encode("utf-8"), when))
+                _put(zf, "MANIFEST.json", (json.dumps({"schema": "svfr.bwm.bundle/1", "date": date, "section": sid,
+                                                       "files": manifest}, indent=1, sort_keys=True) + "\n"
+                                           ).encode("utf-8"), when)
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
+        part.replace(z)
+        say(f"  section {sid}: {z.name} ({z.stat().st_size / 1e6:.1f} MB, {len(keys)} papers, {len(mine_pdfs)} PDFs, "
+            f"{len(mine_figs)} figure images)")
+        res.append({"id": sid, "zip": str(z), "papers": len(keys), "pdfs": len(mine_pdfs), "figures": len(mine_figs)})
+    return res
 
 
 def _write(part, base, pdfs, left, outs, stats, standalone_page, include_pdfs, date, when, say,
@@ -195,6 +265,10 @@ def _write(part, base, pdfs, left, outs, stats, standalone_page, include_pdfs, d
         for name in SIDECARS:                            # beside the page (it loads them) and in index/
             if name in side:
                 manifest.append(_put(zf, name, side[name], when))
+        for name in sorted(n for n in outs if SECTION_PAGE.match(n)):         # `atlases` mode: each section's page,
+            manifest.append(_put(zf, name, standalone_page(outs[name]).encode("utf-8"), when))   # beside atlas.html
+        for name in sorted(n for n in outs if SECTION_SIDE.match(n)):
+            manifest.append(_put(zf, name, outs[name].encode("utf-8"), when))
         for name in INDEX_FILES:
             manifest.append(_put(zf, f"index/{name}", outs[name].encode("utf-8"), when))
         if "atlas_figures.js" in side:
@@ -267,10 +341,13 @@ def main_bundle(base: Path, pdf_dir: Path, out: Path, B, include_pdfs: bool = Tr
     store = B._tool("figure_bank").default_store(pdf_dir) if include_figures else None
     print(f"bundle: {'PDFs from ' + str(pdf_dir) if include_pdfs else 'no PDFs'}; "
           f"{'figure images from ' + str(store) if store and Path(store).is_dir() else 'no figure images'} -> {out}")
+    titles = {s["id"]: s["title"] for s in B._tool("atlas_project").sections(base)}
     res = bundle(base, pdf_dir, out, B.build_all, B.build_papers, B.standalone_page, include_pdfs=include_pdfs, date=date,
-                 office_outputs=B.office_outputs, rejected_ids=B.rejected_ids, figure_store=store, names=names)
+                 office_outputs=B.office_outputs, rejected_ids=B.rejected_ids, figure_store=store, names=names,
+                 section_titles=titles)
     print(f"wrote {out} ({res['bytes'] / 1e9:.2f} GB, {res['files']} files, {res['pdfs']} PDFs, "
-          f"{res['figures']} figure images)")
+          f"{res['figures']} figure images)" + (f"; and {len(res['sections'])} section zip(s) beside it"
+                                                 if res["sections"] else ""))
     for x in res["left_out"]:
         print(f"  left out: {x}")
     if res["left_out"]:

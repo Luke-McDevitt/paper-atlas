@@ -7,9 +7,12 @@ lookup tables, the atlas page and the portable zip -- resumably, skipping every 
     python tools/atlas.py update [--only a,b] [--skip a,b] [--force] [--gpu auto|yes|no] [--offline]
     python tools/atlas.py status                                            # what the project holds, what is stale
     python tools/atlas.py find "a task in plain words" [--term X] [--keys]  # tools/paper_find.py on this project
+    python tools/atlas.py discover "a task in plain words" [--title T]      # what you have + what is out there
+    python tools/atlas.py discover <slug> --add [--section]                 # ... brought in, as a section
     python tools/atlas.py zip [--no-pdfs] [--no-figures]                    # just the portable .zip
     python tools/atlas.py open                                              # the atlas page (with figure images)
     python tools/atlas.py selftest                                          # an offline end-to-end run in a temp folder
+    python tools/atlas.py import <other project> [--from-pdfs <its PDFs>]   # its topics + PDFs in here (re-run: re-sync)
     python tools/atlas.py export-kit <folder> [--zip] [--check]             # (this repo) the standalone lab-mate kit
     python tools/atlas.py publish <clone> [--push]                          # (this repo) the kit -> the public repo
 
@@ -83,6 +86,15 @@ title = "{title}"                  # the page's title
 subtitle = ""
 short_name = "{short}"             # names the zip: <short_name>_<date>.zip (letters, digits, _ - .)
 bundle_title = "{title} -- portable bundle"
+sections_mode = "banners"          # how [[sections]] show (below): banners | atlases
+# find_example = "sonar odometry without a DVL"      # the Find box: "Describe a task, or type a few terms (e.g. ...)"
+# figures_example = "system architecture, trajectory"   # the Figures tab's search box, likewise
+
+# The generated files' titles are made from the title ("<title>: master paper index"); to word one yourself:
+# [documents]
+# papers = "Sonar navigation papers: master index"   # index/PAPERS.md; also lexicon, labs (their .md), workbook
+#                                                    # (ATLAS.xlsx), papers_docx / lexicon_docx (+ _subtitle), and
+#                                                    # pdfs / pdfs_what (the README in the PDF folder)
 
 [paths]
 papers = "pdfs"                    # the PDF folder, relative to this file; its caches go beside it (pdfs_text, ...)
@@ -103,6 +115,25 @@ papers = "pdfs"                    # the PDF folder, relative to this file; its 
 # id = "slam"
 # title = "Underwater SLAM"
 # query = "simultaneous localization and mapping for underwater vehicles with sonar and an IMU"
+
+# SECTIONS: the atlas in named parts, each a set of topics (and any extra papers, by key); a paper can sit in several.
+# sections_mode (above) = "banners": one page, a banner row picks the section every tab shows; "atlases": also one
+# atlas page (and zip) per section, the same banner row linking the pages.
+# [[sections]]
+# id = "sonar"                       # a slug: names the section's page and zip
+# title = "Sonar navigation"
+# subtitle = "Odometry and SLAM with imaging sonar"
+# color = "#2b6a86"                  # its banner colour (optional)
+# topics = ["sonar"]
+# papers = []                        # extra papers by key, from other topics
+# tasks = ["slam"]                   # the Find tab's one-click tasks inside this section
+
+# `atlas discover "a task in plain words"`: the papers you have for it, and the ones out there (OpenAlex, Semantic
+# Scholar, arXiv) -- open ones fetched by `--add`, closed ones listed with links; `--section` makes the task a section.
+# [discover]
+# also = ["../another_atlas", "zotero_export.csv"]       # these count as "already have it" too
+# proxy = "https://login.proxy.example.edu/login?url="   # your library's proxy: a link for every closed paper
+# sources = "openalex,s2,arxiv"
 
 [pipeline]
 gpu = "auto"                       # auto | yes | no -- embeddings, figure detection and the lookup's dense half
@@ -621,6 +652,13 @@ def cmd_status(P: Project, gpu: str = "", say: Callable = print) -> int:
     say(f"project  {P.dir}\n  title  {cfg['atlas']['title']}\n  PDFs   {P.papers}\n  state  {P.state}")
     say(f"  papers {rows} rows in {len(AP.topic_keys(P.dir))} topics; {len(held)} PDFs held; "
         f"{len(cfg['tasks'])} tasks; GPU {'yes' if c.gpu else 'no'}; embeddings {c.model or 'none'}; figures {c.arm}")
+    secs = AP.sections(P.dir)
+    if secs:
+        keys = {t: {r.get("key") for r in json.loads(_read(P.dir / "papers" / f"{t}.json") or b"[]") if isinstance(r, dict)}
+                for t in AP.topic_keys(P.dir)}
+        say(f"  sections ({AP.sections_mode(P.dir)}): " + "; ".join(
+            f"{s['id']} {len(set().union(*(keys.get(t, set()) for t in s['topics'])) | set(s['papers']))}"
+            for s in secs) + " papers")
     for n in c.notes:
         say(f"  note: {n}")
     st = _state(P)
@@ -634,6 +672,103 @@ def cmd_status(P: Project, gpu: str = "", say: Callable = print) -> int:
 
 def cmd_find(P: Project, rest: Sequence[str]) -> int:
     return run(py(HERE / "paper_find.py", *rest), P)
+
+
+def _title_of(task: str, n: int = 60) -> str:
+    """A section / banner title from a task: its first clause, cut at a word boundary. Pure."""
+    first = re.split(r"(?<=[.;:!?])\s", task.strip(), maxsplit=1)[0].rstrip(".;:!? ")
+    if len(first) <= n:
+        return first
+    return first[:n].rsplit(" ", 1)[0].rstrip(",;: ") + "..."
+
+
+def _ascii_safe(s) -> str:
+    return str(s).encode("ascii", "replace").decode("ascii")
+
+
+def cmd_discover(P: Project, words: Sequence[str], title: str = "", slug: str = "", add: bool = False, top: int = 25,
+                 section: bool = False, plan_file: str = "", sources: str = "", channels: str = "",
+                 refresh: bool = False, gpu: str = "", offline: bool = False, also: Sequence[str] = (),
+                 say: Callable = print) -> int:
+    """Find the papers for a task (tools/atlas_discover.py) -> discover/<slug>/ (DISCOVER.md, GET_THESE.md,
+    add_list.txt, plan.json, run.json); `--add` brings add_list.txt's papers in (`add`: checked, open copies
+    downloaded), `--section` makes the task a section of the atlas (atlas.toml). Naming an earlier discovery by its
+    slug re-runs it from its plan.json (edit the facets / queries there), or with --add / --section only does those."""
+    import atlas_discover as AD
+    today = datetime.date.today().isoformat()
+    text = " ".join(words).strip()
+    if not text:
+        say('discover: give the task in words -- "a few sentences on what you are trying to do" -- or the slug of an '
+            "earlier discovery (discover/<slug>/)")
+        return 2
+    plan = None
+    earlier = P.dir / "discover" / text / "plan.json" if re.fullmatch(r"[a-z0-9_]+", text) else None
+    is_earlier = earlier is not None and earlier.is_file()
+    if is_earlier:
+        plan = json.loads(earlier.read_text(encoding="utf-8"))
+        task, title, slug = plan["task"], title or plan.get("title") or "", text
+    else:
+        task = text
+        title = title or _title_of(task)
+        slug = AD.slug_of(slug or title)
+    if plan_file:
+        plan = json.loads(Path(plan_file).read_text(encoding="utf-8"))
+    chans = [c for c in (channels or ",".join(AD.CHANNELS)).split(",") if c]
+    if [c for c in chans if c not in AD.CHANNELS]:
+        say(f"discover: channels are {', '.join(AD.CHANNELS)} (got {channels})")
+        return 2
+    cfg = AP.config(P.dir)["discover"]
+    srcs = [s.strip() for s in (sources or cfg["sources"]).split(",") if s.strip()]
+    folder = P.dir / "discover" / slug
+    if not (is_earlier and (add or section) and not plan_file):      # search (again): else only add / section
+        dense = None
+        if (gpu or "auto") != "no" and not offline:
+            c = context(P, gpu=gpu, offline=offline)
+            if c.model:
+                dense = AD.dense_scorer(c.py_gpu, c.model, P.state / "discover_cache")
+        say(f"discover {slug}: {_ascii_safe(title)}")
+        net = AD.Net(P.state / "discover_cache", refresh=refresh, offline=offline)
+        res = AD.discover(task, P.dir, title=title, pdfs=P.papers, net=net, channels=chans, sources=srcs, plan=plan,
+                          also=AP.discover_also(P.dir) + [Path(x).resolve() for x in also], dense=dense,
+                          proxy=cfg["proxy"], say=lambda s: say(_ascii_safe(s)))
+        res["plan"]["title"] = title
+        out = AD.write_outputs(P.dir, P.state, slug, res, today, me=ME, top=top)
+        n = {k: sum(c["status"] == k for c in res["candidates"]) for k in (AD.HELD, AD.INDEXED, AD.ELSEWHERE, AD.NEW)}
+        new = [c for c in res["candidates"] if c["status"] == AD.NEW]
+        say(f"discover: {len(res['candidates'])} papers -- in this atlas {n[AD.HELD] + n[AD.INDEXED]} "
+            f"({n[AD.HELD]} with a PDF), elsewhere {n[AD.ELSEWHERE]}, new {len(new)} "
+            f"({sum(c['access']['open'] for c in new)} open) -> {out}")
+        failed = sorted({e["what"] for e in res["log"] if e["error"] and e["error"] != "offline"})
+        if failed:
+            say(f"  COULD NOT ASK: {', '.join(failed)} (a re-run asks only these again)")
+        for c in new[:8]:
+            say(f"  {c['rank']:>4}. {_ascii_safe((c.get('title') or '')[:88])} ({c.get('year') or 'n.d.'}; "
+                f"{'open' if c['access']['open'] else 'closed'})")
+        if not (add or section):
+            say(f"  read {out / 'DISCOVER.md'}; then: {ME} discover {slug} --add [--section]   "
+                f"(edit {out / 'add_list.txt'} first to choose)")
+    rc = 0
+    if add:
+        lst = folder / "add_list.txt"
+        if not lst.is_file():
+            say(f"discover: no {lst} -- run the search first")
+            return 2
+        rc = cmd_add(P, [str(lst)], topic=slug, offline=offline, say=say)
+    if section:
+        cands = []
+        f = P.state / "discover" / slug / "candidates.json"
+        if f.is_file():
+            cands = json.loads(f.read_text(encoding="utf-8")).get("candidates") or []
+        have = [c["local_key"] for c in cands if c.get("status") in (AD.HELD, AD.INDEXED) and c.get("local_key")
+                and int(c.get("rank") or 10 ** 6) <= 60]
+        try:
+            color = AD.add_section(P.dir, slug, title or slug, task, list(dict.fromkeys(have))[:40], today)
+        except (ValueError, AP.ConfigError) as e:
+            say(f"discover: section NOT added -- {e}")
+            return 2
+        say(f"discover: atlas.toml has a new section {slug!r} ({_ascii_safe(title)}; {color}): topic {slug} + "
+            f"{min(len(have), 40)} papers you already had + the Find task. next: {ME} update")
+    return rc
 
 
 def cmd_zip(P: Project, no_pdfs: bool = False, no_figures: bool = False) -> int:
@@ -659,6 +794,17 @@ def cmd_open(P: Project, launch: bool = True, say: Callable = print) -> int:
     for side in ("atlas_citations.js", "atlas_figures.js"):
         if (idx / side).is_file():
             shutil.copy2(idx / side, view / side)
+    for f in view.glob("atlas_*"):                   # section pages of an earlier build (`atlases` mode) go first
+        if B.SECTION_FILE.match(f.name):
+            f.unlink()
+    for f in sorted(idx.glob("atlas_*")):            # each section's own page: its 'All papers' banner links the page
+        if not B.SECTION_FILE.match(f.name):          # under the name it has here (atlas.html, not browser.html)
+            continue
+        if f.suffix == ".html":
+            (view / f.name).write_text(B.standalone_page(f.read_text(encoding="utf-8").replace(
+                '"all":"browser.html"', '"all":"atlas.html"', 1)), encoding="utf-8", newline="\n")
+        else:
+            shutil.copy2(f, view / f.name)
     store = AP.beside(P.papers, "figures")
     link = view / "figures"
     if store.is_dir() and not link.exists():
@@ -743,6 +889,10 @@ def cmd_selftest(keep: bool = False, say: Callable = print) -> int:
     each paper's captioned plot is found, and the zip packs them (2026-10-15: a figure stage that built NOTHING had
     passed this self-test, which never ran it)."""
     tmp = Path(tempfile.mkdtemp(prefix="atlas_selftest_", dir=os.environ.get("SVFR_TMPDIR") or None))
+    # project_of() below points ATLAS_PROJECT at the temp demo for the rest of the PROCESS, and the demo is deleted at
+    # the end -- so put both variables back. MEASURED 2026-10-16: a test that ran this self-test handed the deleted demo
+    # to every later test on its pytest worker (test_paper_facts read demo/papers/_held.json and failed a full sweep).
+    saved_env = {k: os.environ.get(k) for k in (AP.ENV_PROJECT, AP.ENV_PAPERS)}
     try:
         proj = tmp / "demo"
         assert cmd_new(str(proj), "Self-test Atlas") == 0
@@ -789,6 +939,11 @@ def cmd_selftest(keep: bool = False, say: Callable = print) -> int:
             + f"atlas page + zip ({zips[-1].name}) in {proj}")
         return 0
     finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         if not keep:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -809,6 +964,115 @@ def cmd_export_kit(out: str, make_zip: bool = False, check: bool = False, say: C
     return K.export(Path(out), make_zip=make_zip, check=check, say=say)
 
 
+IMPORTED = "_imported.json"
+
+
+def _build_module():
+    """build_bwm.py loaded in this process (its JSON row format, its page helpers)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_atlas_build_bwm", BUILD)
+    B = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(B)
+    return B
+
+
+def _sha256(f: Path) -> str:
+    h = hashlib.sha256()
+    with open(f, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def cmd_import(P: Project, src: str, from_pdfs: str = "", say: Callable = print) -> int:
+    """Another atlas project's papers into this one, topic by topic -- its papers/<topic>.json rows (ratings, notes and
+    all), its refs/<topic>/ records, and every PDF it holds that this project does not (by sha256, under its own name)
+    with its papers/_held.json row (which paper the file is: a scan here keeps that by the bytes) -- so its topics can
+    be a section here (atlas.toml [[sections]]). Run it again to re-sync: a topic it brought in is
+    replaced from the source (papers/_imported.json records which); a topic of this project's own with the same name is
+    refused. atlas.toml is never rewritten: the source's topic labels and tasks, and a [[sections]] block, are printed
+    to paste. `from_pdfs`: the source's PDF folder when its atlas.toml does not say where (it ran with $ATLAS_PAPERS).
+
+    WHY (owner 2026-10-15): one atlas with a section per research area, the distributed-computing papers among them --
+    though another session keeps them as an atlas of its own (report/dist_compute); asked, the owner chose a copy as a
+    section over linking the two atlases, so the copy is one command that re-syncs, not a hand merge."""
+    sd = Path(src).expanduser().resolve()
+    if not (sd / AP.CONFIG).is_file() or sd == P.dir:
+        say(f"import: {sd} is not another atlas project (no {AP.CONFIG})")
+        return 2
+    scfg = AP.config(sd)
+    spdfs = Path(from_pdfs).expanduser().resolve() if from_pdfs else (
+        (sd / scfg["paths"]["papers"]).resolve() if scfg["paths"]["papers"] else sd / "pdfs")
+    man_f = P.dir / "papers" / IMPORTED
+    man = json.loads(_read(man_f) or b"{}")
+    mine = {t for s in (man.get("sources") or {}).values() for t in s.get("topics") or []}
+    topics = AP.topic_keys(sd)
+    clash = sorted(t for t in topics if t in AP.topic_keys(P.dir) and t not in mine)
+    if not topics or clash:
+        say(f"import: nothing done -- " + (f"{sd} has no topics (papers/<topic>.json)" if not topics else
+            f"this project has its own topic(s) {clash}: rename them on one side first"))
+        return 2
+    key = os.path.relpath(sd, P.dir).replace("\\", "/")
+    held = json.loads(_read(sd / "papers" / "_held.json") or b"{}").get("files") or []
+    held_f = P.dir / "papers" / "_held.json"
+    mine_held = json.loads(_read(held_f) or b"{}")
+    have = {r.get("sha256") for r in mine_held.get("files") or []}
+    missing, clashes, bring, copied = [], [], [], 0
+    for r in held:
+        if not (r.get("file") and r.get("sha256") and r.get("key")) or r["sha256"] in have:
+            continue
+        s, d = spdfs / r["file"], P.papers / r["file"]
+        if d.exists():                                # an earlier import's copy (its record comes below), or a clash
+            if _sha256(d) == r["sha256"]:
+                bring.append(r)
+            else:
+                clashes.append(r["file"])
+        elif not s.is_file():
+            missing.append(r["file"])
+        else:
+            P.papers.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(s, d)
+            bring.append(r)
+            copied += 1
+    if bring:       # the source's record of WHICH paper each copy is: a scan here keeps it by its bytes. Without it a
+        rows = list(mine_held.get("files") or [])   # copy whose name and page 1 say nothing the matcher trusts (a
+        for r in bring:                             # short title, a file named with --as) is held as nothing --
+            rows.append({"key": r["key"], "file": r["file"], "bytes": (P.papers / r["file"]).stat().st_size,
+                         "sha256": r["sha256"],     # 2026-10-16: 3 of report/dist_compute's 61, until a re-run
+                         "matched_by": f"atlas import from {key} ({r.get('matched_by') or 'its record'})"})
+        got = {r["file"] for r in bring}
+        mine_held.update({"schema": mine_held.get("schema") or "svfr.bwm.held/1",
+                          "files": sorted(rows, key=lambda r: (str(r.get("key")), str(r.get("file")))),
+                          "unmatched": [u for u in mine_held.get("unmatched") or [] if u not in got]})
+        held_f.parent.mkdir(parents=True, exist_ok=True)
+        held_f.write_text(_build_module()._dumps_rows(mine_held, "files"), encoding="utf-8", newline="\n")
+    for t in topics:                                  # whole files: a re-run replaces what an earlier one brought
+        shutil.copy2(sd / "papers" / f"{t}.json", P.dir / "papers" / f"{t}.json")
+        if (P.dir / "refs" / t).is_dir():
+            shutil.rmtree(P.dir / "refs" / t)
+        if (sd / "refs" / t).is_dir():
+            shutil.copytree(sd / "refs" / t, P.dir / "refs" / t)
+    man.setdefault("sources", {})[key] = {"topics": topics, "at": datetime.date.today().isoformat()}
+    man_f.write_text(json.dumps(man, indent=1, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    rows = sum(len(json.loads(_read(sd / "papers" / f"{t}.json") or b"[]")) for t in topics)
+    say(f"import: {rows} rows in {len(topics)} topics from {sd}; {copied} PDFs copied into {P.papers}"
+        + (f"; {len(bring)} held record(s) brought into papers/{held_f.name}" if bring else "")
+        + (f"; {len(missing)} held PDFs not found in {spdfs} (pass --from-pdfs <its PDF folder>)" if missing else "")
+        + (f"; {len(clashes)} not copied: a different file has the name here ({', '.join(clashes[:3])})"
+           if clashes else ""))
+    snip = [f"# from {key} (atlas import) -- paste what you want into {AP.CONFIG}"]
+    for t in topics:
+        snip += [f"[topics.{t}]", f"label = {json.dumps(AP.topic_label(t, cfg=scfg))}", ""]
+    for x in scfg["tasks"]:
+        snip += ["[[tasks]]", *(f"{k} = {json.dumps(x[k])}" for k in ("id", "title", "query")), ""]
+    snip += ["[[sections]]", f"id = {json.dumps(re.sub(r'[^a-z0-9_-]+', '-', sd.name.lower()).strip('-_') or 'imported')}",
+             f"title = {json.dumps(scfg['atlas']['title'])}", f"topics = {json.dumps(topics)}",
+             f"tasks = {json.dumps([x['id'] for x in scfg['tasks']])}"]
+    say("\n".join(snip))
+    say(f"  next: {ME} update --project {_q(P.dir)}   (scan, text, figures, embeddings, the page)")
+    return 1 if missing or clashes else 0
+
+
 def cmd_publish(clone: str, push: bool = False, say: Callable = print) -> int:
     """The kit -> a clone of the public repository (tools/atlas_kit.py, PUBLISH): export with --check, write it over
     the clone's tree, commit naming the private commit; push only with --push."""
@@ -826,8 +1090,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except (AttributeError, ValueError):
             pass
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=["new", "add", "update", "status", "find", "zip", "open", "selftest",
-                                    "export-kit", "publish"])
+    ap.add_argument("cmd", choices=["new", "add", "update", "status", "find", "discover", "zip", "open", "selftest",
+                                    "export-kit", "publish", "import"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("--project", default="", help="the project folder (default: $ATLAS_PROJECT, or the nearest "
                                                   "atlas.toml from here up)")
@@ -849,6 +1113,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--check", action="store_true", help="export-kit: run the kit's selftest from the exported copy")
     ap.add_argument("--push", action="store_true", help="publish: also push (without it: commit in the clone only)")
     ap.add_argument("--keep", action="store_true", help="selftest: keep the temp project")
+    ap.add_argument("--from-pdfs", default="", help="import: the other project's PDF folder (when its atlas.toml "
+                                                    "does not name it)")
+    ap.add_argument("--slug", default="", help="discover: the id of this task's folder / topic / section")
+    ap.add_argument("--add", dest="add_found", action="store_true",
+                    help="discover: bring add_list.txt's papers in (checked; open copies downloaded)")
+    ap.add_argument("--top", type=int, default=25, help="discover: how many new papers add_list.txt lists")
+    ap.add_argument("--section", action="store_true", help="discover: make the task a section of the atlas")
+    ap.add_argument("--plan", default="", help="discover: a plan.json to search with (edited facets / queries)")
+    ap.add_argument("--sources", default="", help="discover: registries to ask (openalex,s2,arxiv)")
+    ap.add_argument("--channels", default="", help="discover: semantic,keywords,citations")
+    ap.add_argument("--refresh", action="store_true", help="discover: ask the APIs again (ignore the cache)")
+    ap.add_argument("--also", action="append", default=[], help="discover: another project or paper list that counts "
+                                                                "as 'already have it'")
     a, rest = ap.parse_known_args(argv)
     if a.cmd == "new":
         if len(a.args) != 1:
@@ -865,6 +1142,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ap.error("publish takes a clone of the public repository (git clone it first)")
         return cmd_publish(a.args[0], push=a.push)
     P = project_of(a.project or None)
+    if a.cmd == "import":
+        if len(a.args) != 1:
+            ap.error("import takes the other atlas project's folder")
+        return cmd_import(P, a.args[0], a.from_pdfs)
     if a.cmd == "add":
         if not a.args:
             ap.error("add takes PDFs, folders, .bib / .json exports or .txt / .csv lists")
@@ -880,6 +1161,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return cmd_status(P, a.gpu)
     if a.cmd == "find":
         return cmd_find(P, list(a.args) + list(rest) + (["--topic", a.topic] if a.topic else []))
+    if a.cmd == "discover":
+        return cmd_discover(P, list(a.args), title=a.title, slug=a.slug, add=a.add_found, top=a.top,
+                            section=a.section, plan_file=a.plan, sources=a.sources, channels=a.channels,
+                            refresh=a.refresh, gpu=a.gpu, offline=a.offline, also=a.also)
     if a.cmd == "zip":
         return cmd_zip(P, a.no_pdfs, a.no_figures)
     if a.cmd == "open":

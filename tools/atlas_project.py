@@ -2,7 +2,8 @@ r"""atlas_project -- WHICH paper atlas a tool works on, and how that atlas is co
 
 An atlas PROJECT is one folder:
 
-    atlas.toml                       title, topic labels and groups, program tasks, pipeline switches (all optional)
+    atlas.toml                       title, topic labels and groups, program tasks, pipeline switches, the generated
+                                     documents' titles (all optional)
     papers/<topic>.json              one row per paper (key, title, year, venue, status, doi / arxiv_id, summary, ...)
     refs/<topic>/verified_refs.json  each paper's API record (tools/verify_refs.py format: authors, abstract, ...)
     lexicon/*.json                   terms, each with verbatim <= 15-word quotes from the papers
@@ -32,7 +33,7 @@ import re
 import tomllib
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = "atlas.toml"
@@ -40,14 +41,38 @@ ENV_PROJECT, ENV_PAPERS = "ATLAS_PROJECT", "ATLAS_PAPERS"
 BLUEBOAT = ROOT / "report" / "boat_world_model"
 #: the citation map draws one panel per group (and one for the backbone): more groups than this do not fit
 MAX_GROUPS = 7
+#: the banner row's sections (a row of buttons above the tabs): more than this would wrap into a second row of banners
+MAX_SECTIONS = 12
+#: how [[sections]] show: "banners" = one page, a banner row picks the section every tab shows; "atlases" = also one
+#: atlas page (and zip) per section, the same banner row linking the pages
+SECTION_MODES = ("banners", "atlases")
+#: atlas.toml [documents]: the title of each file the build writes, word for word -> (its default, made from [atlas]
+#: title / subtitle; the file it titles). 2026-10-16: these sat in build_bwm.py / office.py as the BlueBoat atlas's
+#: own words, so every other project's PAPERS.md read "BlueBoat world-model literature" -- the BlueBoat words now live
+#: in report/boat_world_model/atlas.toml.
+DOCUMENTS: Dict[str, Tuple[str, str]] = {
+    "papers": ("{title}: master paper index", "index/PAPERS.md"),
+    "lexicon": ("{title}: lexicon", "index/LEXICON.md"),
+    "labs": ("{title}: labs", "index/LABS.md"),
+    "workbook": ("{title} -- the index as a workbook", "index/ATLAS.xlsx, its Summary sheet"),
+    "papers_docx": ("{title}: papers", "index/PAPERS.docx"),
+    "papers_docx_subtitle": ("{subtitle}", "index/PAPERS.docx, under its title (none when empty)"),
+    "lexicon_docx": ("{title}: lexicon", "index/LEXICON.docx"),
+    "lexicon_docx_subtitle": ("{subtitle}", "index/LEXICON.docx, under its title (none when empty)"),
+    "pdfs": ("{title}: papers", "README.md of the PDF folder (build_bwm.py scan)"),
+    "pdfs_what": ("the full-text PDFs of the {title}", "that README's `what:` line"),
+}
 
 GENERIC: Dict[str, object] = {
     "atlas": {"title": "Paper Atlas", "subtitle": "", "short_name": "atlas",
-              "bundle_title": "Paper atlas -- portable bundle"},
+              "bundle_title": "Paper atlas -- portable bundle", "sections_mode": "banners",
+              "find_example": "", "figures_example": ""},     # the Find / Figures search boxes' "(e.g. ...)"
     "paths": {"papers": ""},
+    "documents": {k: "" for k in DOCUMENTS},                    # "" = the default DOCUMENTS makes from the title
     "topics": {},
     "groups": [],
     "tasks": [],
+    "sections": [],
     "pipeline": {
         "gpu": "auto",               # auto | yes | no: embeddings, figure detection and the lookup's dense half
         "python_gpu": "",            # the interpreter with torch for those stages ("" = the one running atlas.py)
@@ -64,8 +89,18 @@ GENERIC: Dict[str, object] = {
         "bundle_pdfs": True,
         "bundle_figures": True,
     },
+    # `atlas discover` (tools/atlas_discover.py): finding the papers for a task
+    "discover": {
+        "also": [],                  # other atlas projects (folders) or paper lists (.json / .tsv / .csv) that count as
+                                     # "already have it"; relative to this file; ${VARS} expanded, a missing one skipped
+        "proxy": "",                 # your library's proxy prefix for closed papers, e.g. "https://.../login?url="
+        "sources": "openalex,s2,arxiv",   # the registries asked (any of openalex, s2, arxiv)
+    },
 }
-_STR_KEYS = {"atlas": ("title", "subtitle", "short_name", "bundle_title", "contact_email"), "paths": ("papers",)}
+DISCOVER_SOURCES = ("openalex", "s2", "arxiv")
+_STR_KEYS = {"atlas": ("title", "subtitle", "short_name", "bundle_title", "contact_email", "sections_mode",
+                       "find_example", "figures_example"),
+             "paths": ("papers",), "documents": tuple(DOCUMENTS)}
 
 
 class ConfigError(ValueError):
@@ -121,6 +156,42 @@ def _merge(base: dict, over: dict) -> dict:
     return out
 
 
+def _validate_sections(cfg: dict, task_ids: set, where: str) -> None:
+    """[[sections]]: id (a slug, unique, not 'all'), title, and what it holds -- topics and / or papers (keys); optional
+    subtitle, color (#rrggbb) and tasks (ids of [[tasks]]: the Find tab's one-click tasks inside it)."""
+    if cfg["atlas"].get("sections_mode", "banners") not in SECTION_MODES:
+        raise ConfigError(f"{where}: [atlas] sections_mode must be one of {list(SECTION_MODES)}")
+    secs = cfg["sections"]
+    if not isinstance(secs, list) or not all(isinstance(s, dict) for s in secs):
+        raise ConfigError(f"{where}: [[sections]] are tables (id, title, topics / papers)")
+    if len(secs) > MAX_SECTIONS:
+        raise ConfigError(f"{where}: at most {MAX_SECTIONS} [[sections]] (one banner row)")
+    seen = set()
+    for s in secs:
+        sid = s.get("id")
+        if not (isinstance(sid, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,40}", sid)) or sid == "all":
+            raise ConfigError(f"{where}: [[sections]] id {sid!r} must be a slug (a-z, 0-9, '_', '-') other than 'all'")
+        if sid in seen:
+            raise ConfigError(f"{where}: [[sections]] id {sid!r} is used twice")
+        seen.add(sid)
+        if not (isinstance(s.get("title"), str) and s["title"].strip()):
+            raise ConfigError(f"{where}: [[sections]] {sid!r} needs a title")
+        for k in ("subtitle", "color"):
+            if not isinstance(s.get(k, ""), str):
+                raise ConfigError(f"{where}: [[sections]] {sid!r} {k} must be text")
+        if s.get("color") and not re.fullmatch(r"#[0-9A-Fa-f]{6}", s["color"]):
+            raise ConfigError(f"{where}: [[sections]] {sid!r} color must look like \"#2b6a86\"")
+        for k in ("topics", "papers", "tasks"):
+            v = s.get(k, [])
+            if not (isinstance(v, list) and all(isinstance(x, str) and x for x in v)):
+                raise ConfigError(f"{where}: [[sections]] {sid!r} {k} must be a list of text")
+        if not (s.get("topics") or s.get("papers")):
+            raise ConfigError(f"{where}: [[sections]] {sid!r} holds nothing: give it topics and / or papers")
+        unknown = sorted(set(s.get("tasks", [])) - task_ids)
+        if unknown:
+            raise ConfigError(f"{where}: [[sections]] {sid!r} names tasks no [[tasks]] defines: {unknown}")
+
+
 def _validate(cfg: dict, where: str) -> dict:
     for table, keys in _STR_KEYS.items():
         if not isinstance(cfg.get(table), dict):
@@ -128,6 +199,9 @@ def _validate(cfg: dict, where: str) -> dict:
         for k in keys:
             if not isinstance(cfg[table].get(k, ""), str):
                 raise ConfigError(f"{where}: [{table}] {k} must be text")
+    unknown = sorted(set(cfg["documents"]) - set(DOCUMENTS))       # a typo would title nothing, silently
+    if unknown:
+        raise ConfigError(f"{where}: unknown [documents] keys {unknown} (known: {sorted(DOCUMENTS)})")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,60}", cfg["atlas"]["short_name"]):
         raise ConfigError(f"{where}: [atlas] short_name must be letters, digits, '_', '-', '.' (it names the zip)")
     if not isinstance(cfg["topics"], dict) or not all(isinstance(v, dict) for v in cfg["topics"].values()):
@@ -146,12 +220,43 @@ def _validate(cfg: dict, where: str) -> dict:
     ids = [t["id"] for t in tasks]
     if len(set(ids)) != len(ids):
         raise ConfigError(f"{where}: [[tasks]] ids must be unique")
+    _validate_sections(cfg, set(ids), where)
     if not isinstance(cfg["pipeline"], dict):
         raise ConfigError(f"{where}: [pipeline] must be a table")
     unknown = sorted(set(cfg["pipeline"]) - set(GENERIC["pipeline"]))
     if unknown:
         raise ConfigError(f"{where}: unknown [pipeline] keys {unknown} (known: {sorted(GENERIC['pipeline'])})")
+    dis = cfg["discover"]
+    if not isinstance(dis, dict):
+        raise ConfigError(f"{where}: [discover] must be a table")
+    unknown = sorted(set(dis) - set(GENERIC["discover"]))
+    if unknown:
+        raise ConfigError(f"{where}: unknown [discover] keys {unknown} (known: {sorted(GENERIC['discover'])})")
+    if not (isinstance(dis["also"], list) and all(isinstance(x, str) and x for x in dis["also"])):
+        raise ConfigError(f"{where}: [discover] also must be a list of text (folders or list files)")
+    if not isinstance(dis["proxy"], str):
+        raise ConfigError(f"{where}: [discover] proxy must be text")
+    bad = [s for s in str(dis["sources"]).split(",") if s.strip() not in DISCOVER_SOURCES] \
+        if isinstance(dis["sources"], str) else ["(not text)"]
+    if bad or not str(dis["sources"]).strip():
+        raise ConfigError(f"{where}: [discover] sources must name some of {list(DISCOVER_SOURCES)} (got {bad})")
     return cfg
+
+
+def discover_also(project: Optional[Path] = None) -> List[Path]:
+    """[discover] also as paths: relative ones against the project folder, ${VARS} expanded; an entry that still names
+    an unset variable, or a path that does not exist on this machine, is left out (it is another machine's)."""
+    d = Path(project or project_dir())
+    out = []
+    for x in config(d)["discover"]["also"]:
+        v = os.path.expandvars(x)
+        if "$" in v:
+            continue
+        p = Path(v).expanduser()
+        p = p if p.is_absolute() else (d / p)
+        if p.exists():
+            out.append(p.resolve())
+    return out
 
 
 @lru_cache(maxsize=16)
@@ -251,6 +356,29 @@ def tasks(project: Optional[Path] = None) -> List[Tuple[str, str, str]]:
     return [(t["id"], t["title"], t["query"]) for t in config(project)["tasks"]]
 
 
+def sections(project: Optional[Path] = None) -> List[dict]:
+    """The atlas's named parts, in atlas.toml order: [{id, title, subtitle, color, topics, papers, tasks}] ([] = none:
+    the atlas is one page, as before). A paper can sit in several (section_ids)."""
+    return [{"id": s["id"], "title": s["title"].strip(), "subtitle": s.get("subtitle", "").strip(),
+             "color": s.get("color", ""), "topics": list(s.get("topics", [])), "papers": list(s.get("papers", [])),
+             "tasks": list(s.get("tasks", []))} for s in config(project)["sections"]]
+
+
+def sections_mode(project: Optional[Path] = None) -> str:
+    """'banners' (one page, a banner row picks the section every tab shows) or 'atlases' (also one atlas page and zip
+    per section, the banner row linking the pages)."""
+    return config(project)["atlas"]["sections_mode"]
+
+
+def section_ids(key: str, topics: Sequence[str], secs: Sequence[dict], aliases: Optional[Dict[str, str]] = None
+                ) -> List[str]:
+    """The sections a paper sits in: every one naming one of its topics, or its key (a section's `papers` may name a
+    paper by an alias the index merged away -- `aliases` maps it to the paper's key)."""
+    canon = (lambda k: aliases.get(k, k)) if aliases else (lambda k: k)
+    tops = set(topics)
+    return [s["id"] for s in secs if tops & set(s["topics"]) or key in {canon(k) for k in s["papers"]}]
+
+
 def pipeline(project: Optional[Path] = None) -> dict:
     return config(project)["pipeline"]
 
@@ -274,7 +402,18 @@ def user_agent(tool: str) -> str:
 
 
 def names(project: Optional[Path] = None) -> dict:
-    """The page title / subtitle, the zip's base name and top folder, and its README's first line."""
+    """The page title / subtitle, the zip's base name and top folder, its README's first line, and the examples the
+    page's Find / Figures search boxes show ("" = none)."""
     a = config(project)["atlas"]
     return {"title": a["title"], "subtitle": a["subtitle"], "short_name": a["short_name"],
-            "bundle_title": a["bundle_title"]}
+            "bundle_title": a["bundle_title"], "find_example": a["find_example"].strip(),
+            "figures_example": a["figures_example"].strip()}
+
+
+def documents(project: Optional[Path] = None) -> Dict[str, str]:
+    """The title of every file the build writes (DOCUMENTS): atlas.toml [documents] word for word, else the default
+    made from [atlas] title / subtitle ("Reef Atlas: master paper index")."""
+    cfg = config(project)
+    a, given = cfg["atlas"], cfg["documents"]
+    return {k: given.get(k, "").strip() or default.format(title=a["title"].strip(), subtitle=a["subtitle"].strip())
+            for k, (default, _) in DOCUMENTS.items()}

@@ -89,6 +89,13 @@ Add ` | topic` after it to set its topic. A `.csv` with columns `doi`, `arxiv_id
 For papers on the list, `add` downloads open-access copies (arXiv, and the open copies OpenAlex knows) and checks
 each one; the rest appear in the atlas with links to get them.
 
+**4. Another atlas.** `atlas import <its project folder>` copies another atlas project's topics into yours -- each
+paper's row as it is there (ratings, notes, tags), its verified records, and every PDF it holds that yours does not --
+so its topics can become a section of yours (above: Sections). Run it again to re-sync with that project. It refuses
+a topic name your project already uses for its own papers, never edits your `atlas.toml`, and prints the labels,
+tasks and a `[[sections]]` block to paste in. If that project's PDFs live outside it, add `--from-pdfs <folder>`.
+Then `atlas update`.
+
 **What `add` prints.** Each item is `added`, `present` (already in the atlas), or **NEEDS A LOOK** -- with what it
 found ("closest: '...' (title similarity 0.71)"). It never guesses. If you know what a PDF is, say so:
 
@@ -157,6 +164,44 @@ bundle_pdfs = true                  # false: a small zip without the PDFs
 
 After changing tasks or topics, run `atlas update` (the lookup and the page are rebuilt).
 
+**Sections: one atlas in several parts.** Name parts of the atlas -- each a set of topics, plus any extra papers by
+key -- and the page gets a row of banners, one per section (a paper can sit in several):
+
+```toml
+[atlas]
+sections_mode = "banners"           # or "atlases" (below)
+
+[[sections]]
+id = "marine-wm"
+title = "Marine world models"
+subtitle = "World-model navigation for a survey boat"
+topics = ["marine_wm", "wm_navigation"]
+tasks = ["usv-dynamics-wm"]         # its Find tab's one-click tasks (ids of [[tasks]])
+
+[[sections]]
+id = "mining"
+title = "Paper mining techniques"
+color = "#9b2a64"                   # its banner colour (optional)
+topics = ["paper_mining"]
+papers = ["smith2024parsing"]       # extra papers, by key, from other topics
+```
+
+* `banners` (the default): one page. Picking a banner shows only that section in every tab -- Find, Lexicon (terms
+  its papers define, with their quotes), Papers, Citations, Figures, Labs, Trends -- and a link keeps it:
+  `atlas.html#in=mining&find=layout detection`.
+* `atlases`: each section is also an atlas of its own -- `index\atlas_<id>.html` with only its papers, terms, groups,
+  citations, figures and tasks -- and the same banner row links the pages. `atlas update` (or `atlas zip`) also writes
+  one zip per section, `<short_name>_<id>_<date>.zip`, to hand a section to someone by itself.
+* A section with no papers yet is greyed out (and gets no page): add papers to one of its topics
+  (`atlas add <folder> --topic <topic>`), then `atlas update`.
+
+**Titles and examples.** The files `update` writes take their titles from `title`: `index\PAPERS.md` is "<title>:
+master paper index", `LEXICON.md` / `LEXICON.docx` "<title>: lexicon", `LABS.md` "<title>: labs", `PAPERS.docx`
+"<title>: papers", the README in the PDF folder "<title>: papers". To word one yourself, set it in a `[documents]`
+table -- `papers`, `lexicon`, `labs`, `workbook`, `papers_docx`, `papers_docx_subtitle`, `lexicon_docx`,
+`lexicon_docx_subtitle`, `pdfs`, `pdfs_what` (a misspelt key is refused, by name). Under `[atlas]`, `find_example` and
+`figures_example` put an example into the Find and Figures search boxes.
+
 **Your own terms.** Add a file `lexicon\<topic>.json`: a list of `{"term": ..., "aliases": [...], "definition":
 "...", "citations": [{"key": "<paper key>", "quote": "<= 15 words, verbatim", "where": "p. 3", "source":
 "fulltext"}]}`. Check the quotes against the papers with `python tools\term_mine.py verify lexicon\<topic>.json`
@@ -187,6 +232,50 @@ names, each term's precomputed full-text ranking and the papers' own description
 built from its literature reviews, 715 held-out task queries) this found more of the papers a review cites in the top
 ten than full-text search alone (0.849 vs 0.780). Your atlas is a different corpus, so treat that as a reason to
 trust the method, not a number for your papers.
+
+---
+
+## Papers for a new task: `atlas discover`
+
+`find` searches the papers you have. `discover` also searches the ones you do not have yet -- OpenAlex, Semantic
+Scholar and arXiv -- for a task in plain words, and sorts everything into: already in your atlas, new and open, new
+and closed.
+
+```
+atlas discover "follow a pipeline with a sonar on a small AUV and map its condition" --title "Pipeline following"
+atlas discover pipeline_following --add --section      # bring the new ones in, as a section of your atlas
+atlas update
+```
+
+The first command writes `discover\pipeline_following\`:
+
+* `DISCOVER.md` -- what you already have, the best starting points (surveys, papers with code, new datasets), the new
+  open papers and the new closed ones, each with WHY it is listed (which search found it, which of your best matches
+  it cites or is cited by);
+* `GET_THESE.md` -- the closed papers with their links: the DOI, the publisher's page, Google Scholar (a link for you
+  to click -- the tool never searches Scholar: it has no API and its terms forbid scripts) and your library's proxy
+  when `atlas.toml` names one (`[discover] proxy`). Download what you want into `inbox\`, then `atlas add inbox`;
+* `add_list.txt` -- the top new papers (`--top 25`) as an `atlas add` list: delete a line to skip a paper, add DOIs;
+* `plan.json` -- how it searched: the task's key phrases, the words your best matches share, the facets (each an OR
+  of words) and the keyword queries. If a facet is wrong, fix it there and run `atlas discover pipeline_following`
+  again -- everything already asked is cached.
+
+How it searches, three ways at once because none finds enough alone: **by meaning** (the task's own words to
+OpenAlex's semantic search and Semantic Scholar's search), **by keywords** (queries built from the task: its key
+phrases, your glossary's synonyms for them, and the words your best matching papers use -- frequent in them, rare in
+the rest of your atlas -- on OpenAlex, arXiv and Semantic Scholar) and **by citations** (the papers your best matches
+cite, and the papers citing them). It ranks the lot by the task's meaning (your atlas's embedding model, with a GPU),
+its words, how many searches found a paper, its citation links to your best matches, and its citation count.
+
+`--add` brings `add_list.txt` in as `atlas add` would: each paper checked against its registry, open copies downloaded
+and checked, closed ones listed in the atlas with where to get them. `--section` makes the task a section of your
+atlas (its own banner: the new papers plus the ones you already had) and a one-click task in the Find tab.
+
+Limits: OpenAlex allows a small daily budget without a key (about 100 searches); a free key (openalex.org, your
+account, API key; then `setx OPENALEX_API_KEY <key>` on Windows, `export OPENALEX_API_KEY=<key>` in your shell profile
+elsewhere) gives ten times that. Semantic Scholar's keyless service is shared and often busy. A source that could not
+be asked is named in `DISCOVER.md` under COULD NOT ASK -- its papers are missing, not absent -- and a re-run asks it
+again.
 
 ---
 

@@ -120,6 +120,14 @@ ROOTS: Dict[str, Root] = {
                                about="the Hollywood 2026-09-19 rig processing root: section_recon windows "
                                      "(recon/site{3,4}/<window>/section.npz) and module_merge records "
                                      "(modules/site{3,4}/<module>/merge.json + fuse.json)"),
+    # Added 2026-10-16 for the Aqua2 HoloOcean port: `python -m sim.aqua2.params build` generates the model's parameters
+    # from this drop. The lab computer's full working copy (Unity caches included) sits under svfr/simenvs_src at a
+    # drive root (step 5); the library files the raw clone without caches (step 6). IR customer-only material.
+    "AQUASIM": Root(env="SVFR_AQUASIM", folder="svfr/simenvs_src/ir-aquasim",
+                    marker="AquaSim/Assets/Prefabs/AmphibiousAqua.prefab",
+                    lib="60_software/aquasim/2026-10-15_ir-aquasim/ir-aquasim",
+                    about="Independent Robotics' AquaSim drop: the ir-aquasim clone (the Unity project AquaSim/, "
+                          "RoboDevel/, ws/); customer-only, internal to the lab"),
 }
 
 
