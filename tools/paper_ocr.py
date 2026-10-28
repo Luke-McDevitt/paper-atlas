@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import re
 import sys
@@ -41,6 +40,9 @@ from typing import Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paper_text as PT  # noqa: E402
+if str(Path(__file__).resolve().parents[1]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 LIGHTON = "lightonai/LightOnOCR-3-0.8B"
 needs_ocr = PT.needs_ocr                                # one definition, shared with the text cache's OCR merge
@@ -115,7 +117,10 @@ def reading_order(lines, page_w: float) -> list:
 
 
 def looped(text: str) -> bool:
-    """A generation that repeats itself compresses far better than prose (zlib ratio < 0.13 -- LightOn's own check)."""
+    """A generation that repeats itself compresses far better than prose (zlib ratio < 0.13 -- LightOn's own check).
+    The ratio depends on the zlib BUILD near that line (MEASURED 2026-10-19: one synthetic text is 0.1257 on zlib 1.3.1
+    -- Linux, Windows py3.12 -- and 0.1524 on zlib-ng 2.2.4, Windows py3.14), so a text close to 0.13 can flip between
+    machines; a real loop (~0.014) and prose (~0.3 and up) sit far from it on both."""
     b = (text or "").encode("utf-8")
     return len(b) > 2000 and len(zlib.compress(b)) / len(b) < 0.13
 
@@ -235,6 +240,20 @@ def tried_pages(store: Path, sha: str, engine: Optional[str] = None) -> set:
     return usable | set.intersection(*per.values())
 
 
+def needs_listing(cache: Path, store: Path, sha: str, man: Dict[str, dict], engine: Optional[str] = None
+                  ) -> Optional[tuple]:
+    """(pages, pages still to OCR) when `need` lists this paper, else None -- the rule `need` applies per paper (and
+    tools/atlas_coverage.py, per paper and machine)."""
+    tried = tried_pages(store, sha, engine)
+    bad = [x for x in pages_needing_ocr(cache, sha) if x not in tried]
+    tot = (man.get(sha) or {}).get("pages") or 0
+    title = 1 in bad and PT.stamp_only(_page(cache, sha, 1))
+    begun = any(store_file(store, e, sha).is_file() for e in PT.OCR_ENGINES)   # a paper OCR has begun on: every
+    if bad and tot and (len(bad) >= 3 or len(bad) / tot > 0.2 or title or begun):   # page still to do is offered
+        return tot, len(bad)
+    return None
+
+
 def need(pdfs: Path, say=print, store: Optional[Path] = None, engine: Optional[str] = None) -> List[dict]:
     """Held PDFs with pages the text layer cannot give, worst first -- minus the pages any engine read usably and,
     plain, the pages EVERY engine has tried (with `engine`: the pages THAT engine tried), so a page one engine botched
@@ -246,13 +265,9 @@ def need(pdfs: Path, say=print, store: Optional[Path] = None, engine: Optional[s
     man = PT.read_manifest(cache)
     rows = []
     for sha, n in PT.bwm_names().items():
-        tried = tried_pages(store, sha, engine)
-        bad = [x for x in pages_needing_ocr(cache, sha) if x not in tried]
-        tot = (man.get(sha) or {}).get("pages") or 0
-        title = 1 in bad and PT.stamp_only(_page(cache, sha, 1))
-        begun = any(store_file(store, e, sha).is_file() for e in PT.OCR_ENGINES)   # a paper OCR has begun on: every
-        if bad and tot and (len(bad) >= 3 or len(bad) / tot > 0.2 or title or begun):   # page still to do is offered
-            rows.append({"key": n["key"], "sha": sha, "pages": tot, "need": len(bad), "file": n.get("file", "")})
+        got = needs_listing(cache, store, sha, man, engine)
+        if got:
+            rows.append({"key": n["key"], "sha": sha, "pages": got[0], "need": got[1], "file": n.get("file", "")})
     rows.sort(key=lambda r: (-r["need"] / max(1, r["pages"]), -r["need"]))
     for r in rows:
         say(f"  {r['need']:>4}/{r['pages']:<4} pages  {r['key']}  ({r['file'][:70]})")
@@ -306,7 +321,7 @@ def run(pdfs: Path, store: Path, engine: str, keys: Optional[Sequence[str]] = No
         tmp.write_text(json.dumps({"schema": "svfr.ocr/1", "key": key, "sha256": sha, "engine": engine,
                                    "model": LIGHTON if engine == "lighton" else "rapidocr", "revision": eng.revision,
                                    "pages": merged}, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, out)
+        replace_retry(tmp, out)
         n += len(res)
     return {"engine": engine, "papers": len(todo), "pages": n, "seconds": round(time.time() - t0)}
 

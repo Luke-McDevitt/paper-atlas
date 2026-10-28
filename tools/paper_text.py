@@ -31,7 +31,6 @@ import argparse
 import hashlib
 import json
 import os
-import time
 import re
 import sys
 import unicodedata
@@ -50,6 +49,9 @@ try:
 except ImportError:                                   # pragma: no cover - imported as tools.paper_text
     from tools import data_roots as _data_roots
     from tools import atlas_project as _AP
+if str(ROOT) not in sys.path:                         # run by path: the repo root, for tools/
+    sys.path.insert(0, str(ROOT))
+from tools.atomic_replace import replace_retry  # noqa: E402
 #: the atlas project every paper tool's `--bwm` means (tools/atlas_project.py: $ATLAS_PROJECT, else the nearest
 #: atlas.toml, else the BlueBoat world-model atlas, report/boat_world_model)
 BWM = _AP.project_dir()
@@ -136,14 +138,7 @@ def write_manifest(cache: Path, rows: Dict[str, dict]) -> None:
         f"{r.get('mtime_ns') or ''}" for r in sorted(rows.values(), key=lambda r: r["file"].lower())]
     tmp = Path(cache) / (MANIFEST + ".tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-    for attempt in range(20):                          # Windows: a reader holding the manifest open makes os.replace
-        try:                                           # fail for a moment (WinError 5 / 32)
-            os.replace(tmp, Path(cache) / MANIFEST)
-            return
-        except PermissionError:
-            if attempt == 19:
-                raise
-            time.sleep(0.25)
+    replace_retry(tmp, Path(cache) / MANIFEST)         # Windows: a reader holding the manifest open (WinError 5 / 32)
 
 
 def pdfs_in(folder: Path) -> List[Path]:
@@ -195,7 +190,9 @@ def build(pdfs: Path, cache: Path, workers: int = 0, say=print, extract=None) ->
             cf.parent.mkdir(parents=True, exist_ok=True)
             tmp = cf.with_name(cf.name + ".tmp")
             tmp.write_text(FF.join(pages), encoding="utf-8", newline="\n")
-            os.replace(tmp, cf)
+            # a RECORD, never dropped like a cache: the manifest row below names the extractor that wrote THIS text,
+            # and a text the manifest calls current is never re-extracted
+            replace_retry(tmp, cf)
             new += 1
         st = Path(path).stat()
         man[sha] = {"sha256": sha, "pages": len(pages), "chars": sum(len(p) for p in pages), "extractor": how,
@@ -309,6 +306,31 @@ def ocr_inputs(store: Path, sha: str) -> Tuple[str, Dict[int, Tuple[str, str]]]:
     return (hashlib.sha256("|".join(sig).encode()).hexdigest()[:8] if sig else ""), pages
 
 
+def ocr_hits(layer: List[str], ocr: Dict[int, Tuple[str, str]]) -> List[int]:
+    """The pages whose OCR goes into the text: a page the layer cannot give where the OCR says clearly more, or one
+    already holding exactly its OCR text. Pure; merge_ocr's rule, shared with `ocr_merge_pending`."""
+    return [n for n in sorted(ocr) if 1 <= n <= len(layer)
+            and ((needs_ocr(layer[n - 1]) and _richer(ocr[n][1], layer[n - 1]))
+                 or layer[n - 1] == _clean_page(ocr[n][1]))]
+
+
+def ocr_merge_pending(cache: Path, row: dict, store: Path) -> bool:
+    """True when the next `build` would merge OCR into this paper's text (merge_ocr's test, without the merge): OCR is
+    stored for it, and the text was merged from OTHER OCR inputs, or never merged though some page would take it.
+    (tools/atlas_coverage.py: OCR read but not in the text counts as not done.)"""
+    sha = row["sha256"]
+    cf = cache_file(cache, sha)
+    if not cf.is_file():
+        return False
+    sig, ocr = ocr_inputs(store, sha)
+    if not ocr:
+        return False
+    m = re.search(r"\+ocr-[a-z-]+\.([0-9a-f]+)/", row["extractor"])
+    if m:
+        return m.group(1) != sig
+    return bool(ocr_hits(cf.read_text(encoding="utf-8").split(FF), ocr))
+
+
 def merge_ocr(cache: Path, man: Dict[str, dict], store: Path, pdfs: Path, work=None) -> int:
     """Fill the pages a text layer cannot give with cached OCR, ONLY those pages. The extractor becomes
     'pypdfium2+ocr-<engines>.<signature>/<VERSION>': the FTS index re-reads the paper, a later build skips it while
@@ -340,16 +362,14 @@ def merge_ocr(cache: Path, man: Dict[str, dict], store: Path, pdfs: Path, work=N
         # writing the manifest is re-labelled here, so the index re-reads it (fix check 2026-10-14)
         # OCR replaces a text layer only where it is clearly RICHER: a short but correct page (a half-title) is never
         # swapped for OCR misreads of itself (review 2026-10-14)
-        hit = [n for n in sorted(ocr) if 1 <= n <= len(layer)
-               and ((needs_ocr(layer[n - 1]) and _richer(ocr[n][1], layer[n - 1]))
-                    or layer[n - 1] == _clean_page(ocr[n][1]))]
+        hit = ocr_hits(layer, ocr)
         if not hit and "+ocr-" not in row["extractor"]:
             continue
         for n in hit:
             layer[n - 1] = _clean_page(ocr[n][1])
         tmp = cf.with_name(cf.name + ".tmp")
         tmp.write_text(FF.join(layer), encoding="utf-8", newline="\n")
-        os.replace(tmp, cf)
+        replace_retry(tmp, cf)                           # a RECORD: the manifest row below says it holds the OCR
         head, _, ver = how.rpartition("/")
         base = re.sub(r"\+ocr-.*$", "", head or how)
         engines = "-".join(sorted({ocr[n][0] for n in hit}))
@@ -371,10 +391,12 @@ def default_cache(pdfs: Path) -> Path:
     return p.parent / (p.name + "_text")
 
 
-def bwm_names() -> Dict[str, dict]:
-    """sha256 -> {key, title, year, topics, relevance, file} from the BlueBoat world-model index (held PDFs only)."""
-    held = json.loads((BWM / "papers" / "_held.json").read_text(encoding="utf-8"))
-    papers = {p["key"]: p for p in json.loads((BWM / "index" / "papers.json").read_text(encoding="utf-8"))["papers"]}
+def bwm_names(base: Optional[Path] = None) -> Dict[str, dict]:
+    """sha256 -> {key, title, year, topics, relevance, file} from an atlas project's index (held PDFs only): `base`,
+    default the BlueBoat world-model one (BWM)."""
+    b = Path(base) if base is not None else BWM
+    held = json.loads((b / "papers" / "_held.json").read_text(encoding="utf-8"))
+    papers = {p["key"]: p for p in json.loads((b / "index" / "papers.json").read_text(encoding="utf-8"))["papers"]}
     out = {}
     for r in held.get("files") or []:
         p = papers.get(r["key"], {})

@@ -40,6 +40,9 @@ from typing import Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import atlas_project as _AP  # noqa: E402
+if str(Path(__file__).resolve().parents[1]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 BWM = _AP.project_dir()              # the atlas project `--bwm` means (default: the BlueBoat one)
 DEFAULT_PATTERN = "{author}_{year}_{title}"
 MAX_STEM = 120
@@ -280,7 +283,7 @@ def apply(rows: List[dict], copy: bool = False, log: Optional[Path] = None,
             if copy:
                 tmp = dst.with_name(dst.name + ".part")
                 shutil.copyfile(src, tmp)
-                os.replace(tmp, dst)
+                replace_retry(tmp, dst)
             elif case_only:                               # via a temporary name: some disks ignore a case-only rename
                 tmp = src.with_name(src.name + ".renaming")
                 os.rename(src, tmp)

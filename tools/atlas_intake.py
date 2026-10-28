@@ -772,7 +772,8 @@ def write(project: Path, outcomes: List[Outcome], today: str, verified: bool, sa
 
 def stage(outcomes: List[Outcome], folder: Path, held_keys: Iterable[str] = ()) -> List[str]:
     """Copy every PDF to file into `folder` (a fresh staging folder) -> build_bwm.py add's --as NAME=KEY pairs. A paper
-    the project already holds a PDF for is not staged again."""
+    whose PDF is already in THIS machine's PDF folder (`held_keys` = the record's keys whose file is here: atlas.py
+    `_held_here`) is not staged again; one the record holds but this machine lacks is."""
     held = set(held_keys)
     folder.mkdir(parents=True, exist_ok=True)
     pairs = []

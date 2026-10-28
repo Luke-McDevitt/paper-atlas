@@ -62,7 +62,10 @@ import paper_text as PT  # noqa: E402
 import atlas_project as AP  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-BWM = AP.project_dir()                                # the atlas project (default: the BlueBoat one) -- atlas_project
+if str(ROOT) not in sys.path:                         # run by path: the repo root, for tools/
+    sys.path.insert(0, str(ROOT))
+from tools.atomic_replace import replace_retry  # noqa: E402
+BWM = AP.project_dir()                               # the atlas project (default: the BlueBoat one) -- atlas_project
 LOOKUP_FILE = "_lookup.json"                          # papers/_lookup.json (committed; made by `precompute`)
 RRF_K = 60
 #: signal weights in the fusion, per query REGIME (`regime`): a TERM query (a lexicon term, more or less) or a TASK
@@ -403,17 +406,70 @@ def text_fts(query: str, phrases: Sequence[str] = ()) -> str:
     return " OR ".join(x for x in dict.fromkeys(parts + ([words] if words else [])) if x)
 
 
+def text_door():
+    """The lab's library door (tools/library/remote.py) when this machine has one set up, else None. It serves the lab's
+    paper text caches (`rank` / `pages`, tools/remote_access/library_door.py)."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    try:
+        from tools.library import remote
+        return remote.default()
+    except Exception:                                  # noqa: BLE001 -- no door: this machine's text only
+        return None
+
+
+def collection_of(base: Path, pdfs: Path) -> str:
+    """The name the lab's library door knows a project's text cache by: its PDF folder's name (`<papers>/<name>`,
+    cache `<name>_text` -- the BlueBoat atlas's `boat_wm`), or, for a project whose PDFs default to its own `pdfs/`,
+    its atlas short_name (on the lab those live in `<papers>/<short_name>`: report/*/atlas.toml [paths])."""
+    return Path(pdfs).name if Path(pdfs).name != "pdfs" else AP.config(Path(base))["atlas"]["short_name"]
+
+
 class Corpus:
     """The held papers' full text (tools/paper_text.py) and, with dense=True, the dense model (tools/paper_embed.py).
-    `available` is False when the text cache is not on this machine: the lookup then runs without the text signal."""
+    The papers are the `base` atlas project's (its papers/_held.json; default the BlueBoat one). `available` is False
+    when no text can be reached: the lookup then runs without the text signal.
 
-    def __init__(self, pdfs: Optional[Path] = None, dense: bool = False, model: str = DEFAULT_MODEL):
+    WHERE THE TEXT COMES FROM (2026-10-19, `source`): this machine's cache (`<pdfs>_text`) when it holds a text for
+    EVERY paper the project holds; else the lab's cache through its library door (tools/library/remote.py: `rank` and
+    `pages`, one round trip each, ~1.2 s) when one is set up here -- `door=None` never asks it; else this machine's
+    cache as far as it goes. A door that fails mid-run is dropped for the rest of the run and this machine's cache, if
+    any, answers (`door_error` says why). The dense model never runs through the door."""
+
+    def __init__(self, pdfs: Optional[Path] = None, dense: bool = False, model: str = DEFAULT_MODEL,
+                 base: Optional[Path] = None, door="auto"):
+        self.base = Path(base or BWM)
         self.pdfs = Path(pdfs or PT.DEFAULT_PDFS)
         self.cache = PT.default_cache(self.pdfs)
-        self.available = (self.cache / PT.MANIFEST).is_file() and (BWM / "papers" / "_held.json").is_file()
-        self.names = PT.bwm_names() if self.available else {}
+        held = (self.base / "papers" / "_held.json").is_file()
+        self.names = PT.bwm_names(self.base) if held else {}
         self.by_key = {n["key"]: sha for sha, n in self.names.items()}
+        self.local = held and (self.cache / PT.MANIFEST).is_file()
+        have = set(PT.read_manifest(self.cache)) if self.local else set()
+        self.missing = len(set(self.names) - have)
+        self.door, self.door_error, self.collection = None, "", ""
+        if held and self.missing and door is not None:
+            self.door = text_door() if door == "auto" else door
+            self.collection = collection_of(self.base, self.pdfs) if self.door is not None else ""
         self.dense_name, self._dense, self.want_dense = model, None, dense
+
+    @property
+    def available(self) -> bool:
+        return self.local or self.door is not None
+
+    @property
+    def source(self) -> str:
+        n = len(self.names)
+        if self.door is not None:
+            return f"the lab's text cache '{self.collection}' through {self.door.alias} ({self.missing} of {n} held " \
+                   f"papers have no text on this machine)"
+        if self.local:
+            return f"this machine's text cache ({n - self.missing} of {n} held papers)" + \
+                (f"; the lab's door failed: {self.door_error[:160]}" if self.door_error else "")
+        return "no full text (no text cache here, no library door)"
+
+    def _drop_door(self, e: Exception) -> None:
+        self.door_error, self.door = str(e), None
 
     def bm25(self, query: str, phrases: Sequence[str] = (), limit: int = 1000) -> List[str]:
         """Pages ranked by BM25 for the query's content words OR'ed (the benchmark's 'definition' form, which a task
@@ -423,11 +479,19 @@ class Corpus:
         fts = text_fts(query, phrases)
         if not fts:
             return []
+        if self.door is not None:
+            try:
+                return [self.names[sha]["key"] for sha, _ in self.door.rank(self.collection, fts, limit)
+                        if sha in self.names]
+            except Exception as e:                     # noqa: BLE001 -- the door failed: this machine's text, if any
+                self._drop_door(e)
+                if not self.local:
+                    return []
         PT.index(self.cache, say=lambda *_: None)
         return [r["key"] for r in PT._rank_q(self.cache, fts, self.names, limit)]
 
     def dense(self, query: str) -> List[str]:
-        if not (self.available and self.want_dense):
+        if not (self.local and self.want_dense):
             return []
         import paper_embed as PE
         if self._dense is None:
@@ -438,10 +502,22 @@ class Corpus:
         qv = PE.encode_queries(m, PE.MODELS[self.dense_name], [query], form)[0]
         return ix.rank(qv)[0]
 
+    def pages_many(self, keys: Sequence[str], query: str, n: int = 2) -> Dict[str, List[dict]]:
+        """{key: its best pages} for several papers: through the door in ONE round trip, else `pages` each."""
+        keys = [k for k in keys if self.by_key.get(k)]
+        if self.door is not None and keys:
+            try:
+                got = self.door.pages(self.collection, PT.fts_query(query), [self.by_key[k] for k in keys], n)
+                return {k: got.get(self.by_key[k], []) for k in keys}
+            except Exception as e:                     # noqa: BLE001
+                self._drop_door(e)
+        return {k: self.pages(k, query, n) for k in keys}
+
     def pages(self, key: str, query: str, n: int = 2) -> List[dict]:
-        """A paper's best pages for the query, with highlighted snippets (BM25 over its pages)."""
+        """A paper's best pages for the query, with highlighted snippets (BM25 over its pages) -- this machine's cache;
+        `pages_many` asks the door."""
         sha = self.by_key.get(key)
-        if not (self.available and sha):
+        if not (self.local and sha):
             return []
         import sqlite3
         q = PT.fts_query(query)
@@ -509,16 +585,20 @@ def rank(sig: Dict[str, List[str]], weights: Dict[str, float], ix: Optional[Inde
 def find(query: str = "", terms: Sequence[str] = (), k: int = 20, mode: str = "auto", dense: bool = False,
          require_all: bool = False, topic: str = "", relevance: str = "", held_only: bool = False,
          year_from: int = 0, base: Path = BWM, pdfs: Optional[Path] = None, snippets: bool = True,
-         weights: Optional[Dict[str, float]] = None) -> List[dict]:
+         weights: Optional[Dict[str, float]] = None, corpus: Optional[Corpus] = None, door="auto") -> List[dict]:
     """The papers for a task (free text) and / or a few terms, best first: [{rank, key, title, year, venue, status,
     relevance, topics, held, pdf, url, score, why: [...], pages: [{page, snippet}]}]. `require_all` keeps only papers
-    whose full text (or index words, without the corpus) contains EVERY term -- the grep-like AND."""
+    whose full text (or index words, without the corpus) contains EVERY term -- the grep-like AND. `corpus`: one made
+    already (the CLI prints its `source`); else one for `base` (`door`: Corpus's -- None = this machine's text only)."""
     ix = load_index(str(base))
     terms = [t for t in terms if str(t).strip()]
     text = " ".join([query] + list(terms)).strip()
     if not text:
         return []
-    corpus = None if mode == "atlas" else Corpus(pdfs, dense=dense)
+    if mode == "atlas":
+        corpus = None
+    elif corpus is None:
+        corpus = Corpus(pdfs, dense=dense, base=base, door=door)
     matches = ix.terms.find(text)
     ids = list(dict.fromkeys(m["id"] for m in matches))
     for t in terms:                                    # a term given on its own: exact name / alias first
@@ -542,6 +622,8 @@ def find(query: str = "", terms: Sequence[str] = (), k: int = 20, mode: str = "a
     cb = ix.cited_by_terms(ids)
     pos = {n: {p: i + 1 for i, p in enumerate(r[:200])} for n, r in sig.items()}
     sc = dict(scored)
+    pages = corpus.pages_many([p for p in order if ix.files.get(p)], text) \
+        if snippets and corpus is not None and corpus.available else {}
     out = []
     for i, key in enumerate(order, 1):
         p = ix.by_key[key]
@@ -562,8 +644,7 @@ def find(query: str = "", terms: Sequence[str] = (), k: int = 20, mode: str = "a
         if corpus is not None and corpus.available and ix.files.get(key):
             f = corpus.pdfs / ix.files[key]
             rec["pdf"] = str(f) if f.is_file() else ""
-            if snippets:
-                rec["pages"] = corpus.pages(key, text)
+            rec["pages"] = pages.get(key, [])
         out.append(rec)
     return out
 
@@ -597,7 +678,7 @@ def _filters(ix: Index, topic: str, relevance: str, held_only: bool, year_from: 
 
 def _has_all(ix: Index, corpus: Optional[Corpus], key: str, terms: Sequence[str]) -> bool:
     """Every term occurs in the paper: in its full text when this machine has it, else in its index words."""
-    if corpus is not None and corpus.available and key in corpus.by_key:
+    if corpus is not None and corpus.local and key in corpus.by_key:
         f = PT.cache_file(corpus.cache, corpus.by_key[key])
         if f.is_file():
             body = PT._flat_ws(f.read_text(encoding="utf-8")).lower()
@@ -613,7 +694,7 @@ def precompute(base: Path = BWM, pdfs: Optional[Path] = None, model: str = DEFAU
     the benchmark measured best (BM25 + dense, RRF), top TOP_PER_TERM. Needs the text cache, the dense vectors and
     the GPU venv; deterministic for one corpus and model."""
     import paper_embed as PE
-    corpus = Corpus(pdfs, dense=True, model=model)
+    corpus = Corpus(pdfs, dense=True, model=model, base=base, door=None)
     if not corpus.available:
         raise SystemExit(f"no text cache at {corpus.cache}: run `python tools/paper_text.py build` first")
     ix = Index(base)
@@ -809,7 +890,7 @@ def bench(base: Path = BWM, pdfs: Optional[Path] = None, split: str = "all", n: 
     if n and n < len(qs):
         qs = random.Random(seed).sample(qs, n)
         qs.sort(key=lambda q: q["id"])
-    corpus = Corpus(pdfs, dense=dense, model=model)
+    corpus = Corpus(pdfs, dense=dense, model=model, base=base, door=None)
     if not corpus.available:
         raise SystemExit(f"bench needs the text cache ({corpus.cache})")
     PT.index(corpus.cache, say=say)
@@ -968,7 +1049,7 @@ def _memo(corpus: Corpus, model: str):
     def save():
         tmp = f.with_name(f"{f.name}.{os.getpid()}.tmp")
         tmp.write_bytes(gzip.compress(json.dumps({"corpus": sig, "rankings": memo}).encode("utf-8")))
-        os.replace(tmp, f)
+        replace_retry(tmp, f, may_drop=True)           # a cache: a memo held open past the bound is re-asked next run
     return memo, save
 
 
@@ -1025,6 +1106,8 @@ def main(argv=None) -> int:
     ap.add_argument("--json", dest="fmt", action="store_const", const="json")
     ap.add_argument("--tsv", dest="fmt", action="store_const", const="tsv")
     ap.add_argument("--no-snippets", action="store_true")
+    ap.add_argument("--local-text", action="store_true",
+                    help="full text from this machine's cache only: never ask the lab's library door")
     ap.add_argument("--pdfs", type=Path, default=None, help="the papers folder (default: as tools/paper_text.py)")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--split", choices=["all", "dev", "test"], default="all", help="bench: which half")
@@ -1082,10 +1165,13 @@ def main(argv=None) -> int:
     query, terms = " ".join(a.query), list(a.term)
     if a.require_all:                                  # --all: every argument is a term the paper must contain
         query, terms = "", list(a.query) + list(a.term)
+    corpus = None if a.mode == "atlas" else Corpus(a.pdfs, dense=a.dense, door=None if a.local_text else "auto")
     hits = find(query, terms, k=a.k, mode=a.mode, dense=a.dense, require_all=a.require_all,
                 topic=a.topic, relevance=a.relevance, held_only=a.held, year_from=a.year_from, pdfs=a.pdfs,
-                snippets=not a.no_snippets)
+                snippets=not a.no_snippets, corpus=corpus)
     _print_hits(hits, a.fmt)
+    if corpus is not None and a.fmt == "text":
+        print(f"(full text: {corpus.source})".encode("ascii", "replace").decode("ascii"))
     return 0 if hits else 1
 
 

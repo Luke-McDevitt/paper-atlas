@@ -44,6 +44,9 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paper_text as PT  # noqa: E402  (the shared text cache and the BlueBoat index)
+if str(Path(__file__).resolve().parents[1]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 UA = "svfr-research/1.0 (academic literature mining; one request per 15 s)"
 #: arxiv.org/robots.txt: "Crawl-delay: 15" for User-agent * (and ar5iv: the file covers *.arxiv.org mirrors)
@@ -119,14 +122,9 @@ def _save_manifest(cache: Path, rows: Dict[str, dict], touched: Optional[set] = 
     tmp = f.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps({"schema": "svfr.arxiv_html/1", "papers": {k: rows[k] for k in sorted(rows)}},
                               indent=0, ensure_ascii=False), encoding="utf-8", newline="\n")
-    for attempt in range(20):                          # Windows refuses the replace while ANOTHER process is reading
-        try:                                           # the manifest (2026-10-14: a 15-s-paced fetch died on WinError 32
-            os.replace(tmp, f)                         # after 46 papers because an eval script had it open)
-            return
-        except PermissionError:
-            if attempt == 19:
-                raise
-            time.sleep(0.5)
+    # Windows refuses the replace while ANOTHER process is reading the manifest (2026-10-14: a 15-s-paced fetch died
+    # on WinError 32 after 46 papers because an eval script had it open): retried, then raised naming it.
+    replace_retry(tmp, f)
 
 
 def pid_alive(pid: int) -> bool:
@@ -196,11 +194,11 @@ class FetchLock:
                                      f"crawl delay holds; stop it first (or delete {self.path} if pid {pid} is not one)")
                 moved = self.path.with_name(f"{self.path.name}.{os.getpid()}.stale")
                 try:                                   # break it ATOMICALLY: move it aside, then check that what moved
-                    os.replace(self.path, moved)       # is the lock judged stale -- not one another fetcher has just
+                    replace_retry(self.path, moved)       # is the lock judged stale -- not one another fetcher has just
                 except FileNotFoundError:              # taken (fix check: an unlink deleted a fresh lock)
                     continue
                 if moved.read_text(encoding="utf-8") != text:
-                    os.replace(moved, self.path)       # someone else's fresh lock: put it back, and look again
+                    replace_retry(moved, self.path)       # someone else's fresh lock: put it back, and look again
                     continue
                 moved.unlink(missing_ok=True)
                 continue

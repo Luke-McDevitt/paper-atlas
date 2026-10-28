@@ -47,6 +47,9 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+if str(Path(__file__).resolve().parents[2]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 OUT_NAMES = ("papers.json", "lexicon.json", "labs.json", "web.json", "PAPERS.md", "LEXICON.md", "LABS.md",
@@ -1879,7 +1882,7 @@ def cmd_obtain(base: Path, src: Optional[Path], pdf_dir: Path, key: str, only: s
                 tmp.unlink(missing_ok=True)
                 refused.append(f"{f.name}: the copy did not match the source -- not kept")
                 continue
-            tmp.replace(target)
+            replace_retry(tmp, target)
         rows.append({"name": f.name, "bytes": f.stat().st_size, "sha256": sha})
     path = base / "papers" / "_obtained.json"
     doc = _load(path, {}) if path.is_file() else {}

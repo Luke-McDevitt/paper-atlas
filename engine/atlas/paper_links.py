@@ -779,7 +779,7 @@ def add_pdfs(inbox: Path, pdf_dir: Path, papers: List[dict], aliases: Dict[str, 
                 dest, n = dest.with_name(f"{stem}_{n}.pdf"), n + 1
         tmp = dest.with_name(dest.name + ".part")
         shutil.copyfile(f, tmp)
-        tmp.replace(dest)
+        replace_retry(tmp, dest)
         by_size.setdefault(dest.stat().st_size, []).append(dest)   # (read by already_here above: never None here)
         shas[dest] = sha
         claimed[key] = f.name
@@ -815,6 +815,9 @@ _TOOLS = str(Path(__file__).resolve().parents[2] / "tools")
 if _TOOLS not in sys.path:
     sys.path.append(_TOOLS)
 import openalex_key as _OK  # noqa: E402
+if str(Path(__file__).resolve().parents[2]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 user_env, openalex_auth, openalex_request, openalex_urlopen = _OK.user_env, _OK.auth, _OK.request, _OK.urlopen
 

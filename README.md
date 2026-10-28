@@ -55,6 +55,37 @@ PowerShell runs a command in the current folder only as `.\atlas`.
 
 ---
 
+## The app: buttons instead of commands
+
+Never opened a terminal? **Double-click `atlas-app.cmd`** (Windows) in the kit folder -- or run `./atlas-app.sh`
+(macOS / Linux). The first time on a computer it runs the setup above for you (a few minutes); after that it opens
+your atlas in a window of its own (Edge or Chrome; else your default browser), with a toolbar:
+
+| button | what it does (the command it runs for you) |
+|---|---|
+| *the project's name* | open another atlas project (your recent ones are listed), or make a new one -- a folder and a title (`atlas new`) |
+| **Add papers** | a folder of PDFs (the project's `inbox` is one click), files or a Zotero / BibTeX export, or a pasted list of DOIs / arXiv ids / titles; optionally a topic (`atlas add`) |
+| **Update** | builds or refreshes the atlas; *force* re-runs every stage, *offline* skips the network ones (`atlas update`) |
+| **Status** | what the project holds and what is out of date (`atlas status`) |
+| **Discover** | describe a task: the papers you have for it and the ones out there; then read the report, the closed papers' links, and bring the new ones in -- optionally as a section (`atlas discover`) |
+| **Make zip** | the portable copy, with or without the PDFs; *Show the folder* opens where it is (`atlas zip`) |
+| **Settings** | your **OpenAlex API key**, your **contact e-mail** and **GPU** on / off |
+
+One job runs at a time; its output streams into a panel at the bottom (**Cancel** stops it), and the atlas reloads
+when it ends. Each *Browse...* button opens your system's own file dialog (on Linux it needs `python3-tk`; without it,
+paste the path). `atlas app` in a project folder opens the app on that project.
+
+**Your key and address stay on your computer**, outside every project: in `%APPDATA%\paper-atlas\settings.json`
+(Windows), `~/Library/Application Support/paper-atlas/` (macOS) or `~/.config/paper-atlas/` (Linux), readable by
+you only. They reach the kit's tools only as environment variables while a job runs -- never in a command line, a
+link or a log -- and the app shows them again only masked ("set (ends ...abcd)"). On Windows a key you stored
+yourself with `setx OPENALEX_API_KEY` wins over the app's; Settings tells you when there is one.
+
+The app is a small web server on your own computer only (127.0.0.1): it refuses requests from other machines and
+from other web pages. It stops by itself 15 minutes after you close its window.
+
+---
+
 ## Quick start
 
 ```
@@ -68,7 +99,8 @@ atlas open
 
 `add` brings papers in; `update` does everything else (the first run on a few hundred papers takes from minutes to
 an hour, mostly reading PDFs and finding figures; later runs only do what changed). `atlas status` shows what the
-project holds and what is out of date.
+project holds and what is out of date; `atlas coverage` shows, PER PAPER, which step each paper is still missing
+on this computer (`atlas coverage --missing figures` lists them).
 
 ---
 
@@ -300,6 +332,7 @@ again.
 | `setup gpu` warns that torch cannot use the GPU | update the NVIDIA driver, or name a PyTorch index: `set ATLAS_CUDA=cu126`, then `setup.cmd gpu` |
 | no Word copies | install pandoc and run `atlas update --only build` |
 | a stage keeps failing | `atlas status`, then read its log in `pdfs_atlas\logs\` |
+| some papers have no figures / search vectors | `atlas coverage` names them and the step each misses; `atlas update --only <step>` fills them |
 | start a stage over | `atlas update --only <stage> --force` |
 
 ---

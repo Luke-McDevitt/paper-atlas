@@ -41,6 +41,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+if str(Path(__file__).resolve().parents[1]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 #: a bare "application/pdf" Accept got HTTP 406 from arxiv.org on 2 of 41 papers (2026-10-01); */* is the fallback
 def _user_agent(tool: str) -> str:
@@ -265,7 +268,7 @@ def fetch_arxiv_pdf(aid, dest, get=http_get, fallback=curl_get):
         return False, f"cut off: {len(data)} bytes and no %%EOF at the end -- not saved"
     tmp = dest.with_suffix(".part")
     tmp.write_bytes(data)
-    tmp.replace(dest)
+    replace_retry(tmp, dest)
     return True, len(data)
 
 
@@ -377,7 +380,7 @@ def fetch_open(papers, found, folder, get=http_get, sleep=3.0, limit=None, say=p
                 dest = Path(folder) / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', p['key'] or 'paper')}.pdf"
                 tmp = dest.with_suffix(".part")
                 tmp.write_bytes(data)
-                tmp.replace(dest)
+                replace_retry(tmp, dest)
                 ok, detail = True, f"{len(data) // 1024} KB from {u}"
                 break
             detail = f"{u}: not a whole PDF ({len(data)} bytes)"

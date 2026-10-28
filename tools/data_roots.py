@@ -128,6 +128,19 @@ ROOTS: Dict[str, Root] = {
                     lib="60_software/aquasim/2026-10-15_ir-aquasim/ir-aquasim",
                     about="Independent Robotics' AquaSim drop: the ir-aquasim clone (the Unity project AquaSim/, "
                           "RoboDevel/, ws/); customer-only, internal to the lab"),
+    # Added 2026-10-18 for the Aqua2 port's P5 (`sim.aqua2.holo_render mission`): the lab's own mission scripts for
+    # AquaSim (the owner's sq*.py square demos), filed beside the drop. The library item mirrors the clone's paths.
+    "AQUA2_LAB": Root(env="SVFR_AQUA2_LAB", folder="svfr/aqua2-lab-additions",
+                      marker="ir-aquasim/ws/src/aqua2_navigation/example_scripts/sq3.py",
+                      lib="50_projects/aqua2-aquasim/2026-10-15_lab-additions",
+                      about="the lab's additions to the AquaSim drop: the owner's sq2-sq25.py square and camera "
+                            "obstacle demos, their ONNX model, supervisor logs and run notes; internal to the lab"),
+    # Added 2026-10-19 for `tools.farm.land_bundle export`, which writes a worktree's bundle into the outbox the laptop
+    # pulls from. The lab's transfer dir sits at a drive root (step 5); its gate takes `--root <it>` (report/
+    # LAB_REMOTE_ACCESS.md), so point the variable at it on any machine where it sits elsewhere.
+    "XFER": Root(env="SVFR_XFER", folder="svfr/xfer", marker="outbox",
+                 about="the lab's SSH transfer dir (the xfer door's --root): inbox/ the laptop pushes into, outbox/ "
+                       "the laptop pulls from, xfer-log.jsonl"),
 }
 
 

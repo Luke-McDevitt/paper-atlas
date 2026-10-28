@@ -6,11 +6,13 @@ lookup tables, the atlas page and the portable zip -- resumably, skipping every 
     python tools/atlas.py add  <pdf|folder|.bib|.json|.txt>... [--topic T] [--as FILE=DOI] [--offline] [--no-fetch]
     python tools/atlas.py update [--only a,b] [--skip a,b] [--force] [--gpu auto|yes|no] [--offline]
     python tools/atlas.py status                                            # what the project holds, what is stale
+    python tools/atlas.py coverage [--missing STAGE] [--json] [--pdfs DIR]  # PER PAPER: which stage it misses HERE
     python tools/atlas.py find "a task in plain words" [--term X] [--keys]  # tools/paper_find.py on this project
     python tools/atlas.py discover "a task in plain words" [--title T]      # what you have + what is out there
     python tools/atlas.py discover <slug> --add [--section]                 # ... brought in, as a section
     python tools/atlas.py zip [--no-pdfs] [--no-figures]                    # just the portable .zip
     python tools/atlas.py open                                              # the atlas page (with figure images)
+    python tools/atlas.py app                                               # the APP: the atlas + buttons (atlas_app.py)
     python tools/atlas.py selftest                                          # an offline end-to-end run in a temp folder
     python tools/atlas.py import <other project> [--from-pdfs <its PDFs>]   # its topics + PDFs in here (re-run: re-sync)
     python tools/atlas.py export-kit <folder> [--zip] [--check]             # (this repo) the standalone lab-mate kit
@@ -72,6 +74,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import atlas_project as AP  # noqa: E402
 import atlas_setup as SETUP  # noqa: E402
+if str(Path(__file__).resolve().parents[1]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 ROOT = AP.ROOT
 ENGINE = AP.ENGINE
@@ -290,6 +295,17 @@ def cmd_new(folder: str, title: str = "") -> int:
 
 
 # ------------------------------------------------------------------------------------------------------ add
+def _held_here(P: Project) -> set:
+    """Keys whose PDF the record holds AND this machine's PDF folder has (build_bwm.py add's `held_here`). The record is
+    committed, the PDFs are not: on another machine a held paper's PDF may be missing, and it must then be staged again
+    (2026-10-22, the lab: an 18-paper drop the laptop had already indexed staged NOTHING, so the lab's uf_atlas folder
+    stayed empty)."""
+    path = P.dir / "papers" / "_held.json"
+    rows = (json.loads(path.read_text(encoding="utf-8")).get("files") or []) if path.is_file() else []
+    return {r.get("key") for r in rows if isinstance(r, dict) and r.get("key") and r.get("file")
+            and (P.papers / r["file"]).is_file()}
+
+
 def cmd_add(P: Project, inputs: Sequence[str], topic: str = "", vouch: Sequence[str] = (), offline: bool = False,
             fetch: bool = True, build: bool = True, say: Callable = print) -> int:
     import atlas_intake as I
@@ -326,10 +342,9 @@ def cmd_add(P: Project, inputs: Sequence[str], topic: str = "", vouch: Sequence[
     if fetch and reg is not None:
         I.fetch_open(outcomes, P.state / "fetched", say=say)
     added = I.write(P.dir, outcomes, today, verified=reg is not None, say=say)
-    held_keys = {r.get("key") for r in (json.loads((P.dir / "papers" / "_held.json").read_text(encoding="utf-8"))
-                                        .get("files") or [])} if (P.dir / "papers" / "_held.json").is_file() else set()
+    held_here = _held_here(P)
     stage_dir = P.state / "staging" / datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    pairs = I.stage(outcomes, stage_dir, held_keys)
+    pairs = I.stage(outcomes, stage_dir, held_here)
     rc = 0
     filed = 0
     if build and pairs:
@@ -338,9 +353,7 @@ def cmd_add(P: Project, inputs: Sequence[str], topic: str = "", vouch: Sequence[
         for pr in pairs:
             cmd += ["--as", pr]
         rc = run(cmd, P)
-        now = {r.get("key") for r in (json.loads((P.dir / "papers" / "_held.json").read_text(encoding="utf-8"))
-                                      .get("files") or [])} if (P.dir / "papers" / "_held.json").is_file() else set()
-        filed = len({pr.rsplit("=", 1)[1] for pr in pairs} & (now - held_keys))
+        filed = len({pr.rsplit("=", 1)[1] for pr in pairs} & (_held_here(P) - held_here))
         if rc == 0:
             shutil.rmtree(stage_dir, ignore_errors=True)
     elif build and sum(added.values()):
@@ -408,6 +421,14 @@ def _folder_sig(c: Ctx) -> str:
     return _digest(*rows)
 
 
+def _here_sig(c: Ctx) -> str:
+    """The record AND this machine's PDF folder: the inputs of a stage that fills a per-paper cache outside git (text,
+    ocr, html, embed, figures). The record alone is not enough -- on another machine the PDFs a committed record holds
+    can arrive later (2026-10-22, the lab: 18 held PDFs copied into uf_atlas, and text / ocr / figures stayed 'up to
+    date' from a run on the then-empty folder)."""
+    return _held_sig(c) + _folder_sig(c)
+
+
 def _files_sig(folder: Path, pattern: str = "*.json", skip: Sequence[str] = ()) -> str:
     return _digest(*[f.name.encode() + b"=" + _read(f) for f in sorted(folder.glob(pattern)) if f.name not in skip])
 
@@ -444,26 +465,26 @@ STAGES: List[Stage] = [
     Stage("scan", "which PDFs the project holds", lambda c: [_base_cmd(c, "scan", "--pdfs", c.P.papers)],
           lambda c: _folder_sig(c) + _files_sig(c.P.dir / "papers", "*.json", ("_held.json",)), _always, True),
     Stage("text", "page text + search index", lambda c: [py(HERE / "paper_text.py", "build", "--pdfs", c.P.papers)],
-          _held_sig, _always, True),
+          _here_sig, _always, True),
     Stage("ocr", "scanned pages (RapidOCR), then their text",
           lambda c: [py(HERE / "paper_ocr.py", "run", "--bwm", "--engine", "rapid", "--pdfs", c.P.papers),
-                     py(HERE / "paper_text.py", "build", "--pdfs", c.P.papers)], _held_sig,
+                     py(HERE / "paper_text.py", "build", "--pdfs", c.P.papers)], _here_sig,
           lambda c: _onoff("ocr")(c) or ("" if c.ocr_ok else "RapidOCR is not installed (pip install rapidocr "
                                                               "onnxruntime)")),
     Stage("html", "arXiv LaTeX HTML (one page per 15 s)",
           lambda c: [py(HERE / "arxiv_html.py", "fetch", "--bwm", "--pdfs", c.P.papers),
                      py(HERE / "arxiv_html.py", "parse", "--bwm", "--pdfs", c.P.papers)],
-          _held_sig, _onoff("arxiv_html", needs_net=True)),
+          _here_sig, _onoff("arxiv_html", needs_net=True)),
     Stage("facts", "code links, datasets, metrics, hardware",
           lambda c: [py(HERE / "paper_facts.py", "--bwm", "--pdfs", c.P.papers)], _held_sig, _onoff("facts")),
     Stage("embed", "dense vectors for search", lambda c: [[c.py_gpu, str(HERE / "paper_embed.py"), "embed", "--model",
                                                           c.model, "--bwm", "--pdfs", str(c.P.papers)]],
-          lambda c: _held_sig(c) + c.model, lambda c: "" if c.model else "no embedding model", gpu=True),
+          lambda c: _here_sig(c) + c.model, lambda c: "" if c.model else "no embedding model", gpu=True),
     Stage("figures", "every figure and its caption",
           lambda c: [[c.py_gpu if (c.arm != "heuristic" and cmd == "detect") else sys.executable,
                       str(HERE / "figure_bank.py"), cmd, "--bwm", "--arm", c.arm, "--pdfs", str(c.P.papers)]
                      for cmd in (("build",) if c.arm == "heuristic" else ("detect", "build"))],
-          lambda c: _held_sig(c) + c.arm, lambda c: "" if c.arm != "off" else "off in atlas.toml ([pipeline] figures)",
+          lambda c: _here_sig(c) + c.arm, lambda c: "" if c.arm != "off" else "off in atlas.toml ([pipeline] figures)",
           gpu=True),
     Stage("meta", "venue, dates, citations, reference lists (OpenAlex)",
           lambda c: [_base_cmd(c, "meta", *([] if c.cfg["pipeline"]["github_stars"] else ["--no-stars"]),
@@ -568,7 +589,7 @@ def _save_state(P: Project, st: dict) -> None:
     P.state.mkdir(parents=True, exist_ok=True)
     tmp = P.state / "state.json.tmp"
     tmp.write_text(json.dumps(st, indent=1, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
-    os.replace(tmp, P.state / "state.json")
+    replace_retry(tmp, P.state / "state.json")
 
 
 def _sig(stage: Stage, c: Ctx) -> str:
@@ -670,6 +691,47 @@ def cmd_status(P: Project, gpu: str = "", say: Callable = print) -> int:
     return 0
 
 
+def cmd_coverage(projects: Sequence[Project], gpu: str = "", missing: str = "", as_json: bool = False,
+                 say: Callable = print) -> int:
+    """`coverage`: per held paper, which mining stage it is missing on THIS machine (tools/atlas_coverage.py) -- every
+    atlas of this repository with no --project. Exit 0 complete, 1 something missing, 2 an atlas not measurable."""
+    import atlas_coverage as COV
+    B = _build_module()
+    results = []
+    probes: Dict[tuple, bool] = {}                     # one torch / GPU probe per interpreter, not one per atlas
+
+    def once(f):
+        def g(*a):
+            if (f.__name__, *a) not in probes:
+                probes[(f.__name__, *a)] = f(*a)
+            return probes[(f.__name__, *a)]
+        return g
+    real = {n: globals()[n] for n in ("gpu_available", "has_module")}
+    globals().update({n: once(f) for n, f in real.items()})
+    try:
+        results = [_coverage_one(P, B, COV, gpu) for P in projects]
+    finally:
+        globals().update(real)
+    if as_json:
+        say(COV.as_json(results))
+    else:
+        COV.report(results, say=say, missing=missing)
+    return COV.exit_code(results)
+
+
+def _coverage_one(P: Project, B, COV, gpu: str) -> dict:
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):          # its notes come back in c.notes
+            c = context(P, gpu)
+        notes = list(c.notes) + ([] if c.ocr_ok or not c.cfg["pipeline"].get("ocr", True) else
+                                 ["RapidOCR is not installed here: `atlas update` skips the ocr stage"])
+        return COV.measure(P.dir, P.papers, B, model=c.model, arm=c.arm, cfg=c.cfg, notes=notes)
+    except (COV.CannotMeasure, AP.ConfigError) as e:
+        return {"project": COV._rel(P.dir), "error": str(e)}
+
+
 def cmd_find(P: Project, rest: Sequence[str]) -> int:
     return run(py(HERE / "paper_find.py", *rest), P)
 
@@ -769,6 +831,11 @@ def cmd_discover(P: Project, words: Sequence[str], title: str = "", slug: str = 
         say(f"discover: atlas.toml has a new section {slug!r} ({_ascii_safe(title)}; {color}): topic {slug} + "
             f"{min(len(have), 40)} papers you already had + the Find task. next: {ME} update")
     return rc
+
+
+def cmd_app(project: str = "", rest: Sequence[str] = ()) -> int:
+    """`atlas app`: the Paper Atlas app (tools/atlas_app.py) on --project, else the project here, else the last one."""
+    return subprocess.call(py(HERE / "atlas_app.py", *(["--project", project] if project else []), *rest))
 
 
 def cmd_zip(P: Project, no_pdfs: bool = False, no_figures: bool = False) -> int:
@@ -1090,8 +1157,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except (AttributeError, ValueError):
             pass
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("cmd", choices=["new", "add", "update", "status", "find", "discover", "zip", "open", "selftest",
-                                    "export-kit", "publish", "import"])
+    ap.add_argument("cmd", choices=["new", "add", "update", "status", "coverage", "find", "discover", "zip", "open",
+                                    "selftest", "export-kit", "publish", "import", "app"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("--project", default="", help="the project folder (default: $ATLAS_PROJECT, or the nearest "
                                                   "atlas.toml from here up)")
@@ -1106,6 +1173,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--skip", default="", help="update: skip these stages")
     ap.add_argument("--force", action="store_true", help="update: run the stages even when nothing changed")
     ap.add_argument("--gpu", default="", choices=["", "auto", "yes", "no"], help="update: override [pipeline] gpu")
+    ap.add_argument("--missing", default="", help="coverage: list the papers missing this stage")
+    ap.add_argument("--json", action="store_true", help="coverage: everything, per paper and stage, as JSON")
+    ap.add_argument("--pdfs", default="", help="coverage: the project's PDF folder (default: found as paper_drop does)")
     ap.add_argument("--no-pdfs", action="store_true", help="zip: the atlas and index only")
     ap.add_argument("--no-figures", action="store_true", help="zip: no figure images")
     ap.add_argument("--no-launch", action="store_true", help="open: print the path only")
@@ -1137,10 +1207,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if len(a.args) != 1:
             ap.error("export-kit takes the folder to write the kit to")
         return cmd_export_kit(a.args[0], make_zip=a.zip, check=a.check)
+    if a.cmd == "app":                               # the buttons' app (tools/atlas_app.py); no project needed to start
+        return cmd_app(a.project, list(rest))
     if a.cmd == "publish":
         if len(a.args) != 1:
             ap.error("publish takes a clone of the public repository (git clone it first)")
         return cmd_publish(a.args[0], push=a.push)
+    if a.cmd == "coverage":
+        import atlas_coverage as COV
+        if a.missing and a.missing not in COV.STAGES:
+            ap.error(f"--missing: unknown stage {a.missing!r}; stages: {', '.join(COV.STAGES)}")
+        if a.project or not AP.BLUEBOAT.is_dir():
+            dirs = [project_of(a.project or None).dir]
+        else:                                           # this repository: every atlas in it
+            dirs = COV.repository_atlases()
+        if a.pdfs and len(dirs) != 1:
+            ap.error("--pdfs names ONE project's PDF folder: give --project too")
+        return cmd_coverage([Project(d, COV.corpus_of(d, a.pdfs or None).resolve()) for d in dirs], a.gpu, a.missing,
+                            a.json)
     P = project_of(a.project or None)
     if a.cmd == "import":
         if len(a.args) != 1:

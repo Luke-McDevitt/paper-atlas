@@ -33,6 +33,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paper_text as PT  # noqa: E402
+if str(Path(__file__).resolve().parents[1]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 _Q_TERM = ("Instruct: Given a technical term from robotics, sonar, underwater vehicles or machine learning, retrieve "
            "passages of scientific papers that define or use it\nQuery:")
@@ -255,7 +258,7 @@ def embed(name: str, cache: Path, store: Path, batch: int = 16, say=print, limit
             npy.parent.mkdir(parents=True, exist_ok=True)
             tmp = npy.with_suffix(".tmp.npy")
             np.save(tmp, v[a0:a1].astype(np.float16))
-            tmp.replace(npy)
+            replace_retry(tmp, npy)
             fp.write_text(fpv, encoding="utf-8")
         nw += len(texts)
         say(f"  [{g + len(part)}/{len(todo)}] {nw} windows, {nw / max(1e-9, time.time() - t0):.0f} windows/s")
@@ -341,7 +344,7 @@ def bm25_memo(cache: Path, store: Path, names: Dict[str, dict]):
         f.parent.mkdir(parents=True, exist_ok=True)
         tmp = f.with_name(f"{f.name}.{os.getpid()}.tmp")
         tmp.write_bytes(gzip.compress(json.dumps({"corpus": sig, "rankings": memo}).encode("utf-8")))
-        os.replace(tmp, f)
+        replace_retry(tmp, f, may_drop=True)
     return memo, save
 
 

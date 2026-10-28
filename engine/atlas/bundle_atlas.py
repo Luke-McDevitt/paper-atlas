@@ -41,6 +41,10 @@ import re
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import sys  # noqa: E402
+if str(Path(__file__).resolve().parents[2]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 TOP = "boat_wm_atlas"
 REPORT_GLOBS = ("README.md", "STATE_OF_RESEARCH.md", "LIT_*.md", "plans/*.md", "recon/*.md", "figures/*.png",
@@ -185,7 +189,7 @@ def bundle(base: Path, pdf_dir: Path, out: Path, build_all, build_papers, standa
     except BaseException:
         part.unlink(missing_ok=True)                     # never leave a multi-GB half zip behind (full disk, Ctrl+C)
         raise
-    part.replace(out)
+    replace_retry(part, out)
     secs = []
     if any(SECTION_PAGE.match(n) for n in outs):       # `atlases` mode: one zip per section, with no other page
         solo = build_all(base, local_pdfs=local, all_page="", section_links=False)
@@ -244,7 +248,7 @@ def section_bundles(base: Path, pdfs, solo: Dict[str, str], figs, out: Path, nam
         except BaseException:
             part.unlink(missing_ok=True)
             raise
-        part.replace(z)
+        replace_retry(part, z)
         say(f"  section {sid}: {z.name} ({z.stat().st_size / 1e6:.1f} MB, {len(keys)} papers, {len(mine_pdfs)} PDFs, "
             f"{len(mine_figs)} figure images)")
         res.append({"id": sid, "zip": str(z), "papers": len(keys), "pdfs": len(mine_pdfs), "figures": len(mine_figs)})

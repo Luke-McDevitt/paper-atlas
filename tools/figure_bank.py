@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import os
 import re
 import sys
 import time
@@ -42,6 +41,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paper_text as PT  # noqa: E402
+if str(Path(__file__).resolve().parents[1]) not in sys.path:   # run by path: the repo root, for tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.atomic_replace import replace_retry  # noqa: E402
 
 CAPTION = re.compile(r"^\s*(?:Fig\.?|FIG\.?|Figure|FIGURE)\s*(S?\d{1,3})(?:\s*\(?[a-z]\)?)?\s*[.:|\-–—]?")
 TABLE_CAP = re.compile(r"^\s*(?:Table|TABLE|Tab\.)\s*[IVX\d]+")
@@ -347,7 +349,7 @@ def detect_all(pdfs: Path, store: Path, arm: str, keys: Optional[Sequence[str]] 
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_name(out.name + ".tmp")
         tmp.write_bytes(gzip.compress(json.dumps(d).encode("utf-8")))
-        os.replace(tmp, out)
+        replace_retry(tmp, out)
         pages += len(d["pages"])
         if i % 25 == 0 or i == len(todo):
             say(f"  [{i}/{len(todo)}] {pages} pages, {pages / max(1e-9, time.time() - t0):.1f} pages/s")
@@ -417,7 +419,8 @@ def _det_sig(dp: Path) -> str:
 
 
 def build_all(pdfs: Path, store: Path, arm: str, keys: Optional[Sequence[str]] = None, say=print) -> dict:
-    """figures.json + one WebP per figure for every paper the detector has seen (skips papers already built)."""
+    """figures.json + one WebP per figure for every paper the detector has seen (skips papers already built from these
+    detections whose listed images are all on disk; one with an image missing is rebuilt -- 2026-10-27)."""
     held = _held(pdfs)
     n_p = n_f = 0
     for k, v in sorted(held.items()):
@@ -439,8 +442,11 @@ def build_all(pdfs: Path, store: Path, arm: str, keys: Optional[Sequence[str]] =
                 old = {}
             # built by this arm from these detections: the recorded content signature decides (a bank unpacked on
             # another machine has fresh file times -- fix check 2026-10-14); banks from before it, the file times
-            if old.get("arm") == arm and (old.get("det") == sig if old.get("det")
-                                          else dp.is_file() and fj.stat().st_mtime_ns >= dp.stat().st_mtime_ns):
+            # ... and only while every image it lists is on disk (2026-10-27: abadie2018georeferenced listed 10 images
+            # with none on disk, and `atlas.py update --only figures --force` skipped it, so it was never repaired)
+            if (old.get("arm") == arm and (old.get("det") == sig if old.get("det")
+                                           else dp.is_file() and fj.stat().st_mtime_ns >= dp.stat().st_mtime_ns)
+                    and all((out_dir / f.get("image", "-")).is_file() for f in old.get("figures") or [])):
                 continue
         if fj.is_file():                                       # rebuilt: the old images go first
             try:
@@ -460,7 +466,7 @@ def build_all(pdfs: Path, store: Path, arm: str, keys: Optional[Sequence[str]] =
         tmp = fj.with_name("figures.json.tmp")
         tmp.write_text(json.dumps({"key": k, "sha256": v["sha"], "arm": arm, "det": sig, "figures": figs},
                                   ensure_ascii=False, indent=0), encoding="utf-8")
-        os.replace(tmp, fj)
+        replace_retry(tmp, fj)
         n_p += 1
         n_f += len(figs)
         if n_p % 50 == 0:
